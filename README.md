@@ -7,7 +7,7 @@
 - 券商：银河证券 QMT 实盘（交易终端-北京）
 - 策略 Python：`#coding:gbk`，入口 `init` / `handlebar`
 - 不是 MiniQMT，不要用 `xtquant`
-- Web：Node（Express），已部署 [ptrade.console.enrichlife.today](https://ptrade.console.enrichlife.today/)
+- Web：Node（Express），已部署 [qmt.console.enrichlife.today](https://qmt.console.enrichlife.today/)
 
 ## 桥接系统（进行中）
 
@@ -44,7 +44,7 @@ npm start
 
 启动时会自动建表。也可手动执行 `server/schema.sql`。
 
-Local 和 Cloud 用**同一套** `PTRADE_DATABASE_URL`。SSL 使用 `assets/ApsaraDB-CA-Chain/ApsaraDB-CA-Chain.pem`（`?ssl=true`）。
+Local 和 Cloud 用**同一套** `QMT_DATABASE_URL`。SSL 使用 `assets/ApsaraDB-CA-Chain/ApsaraDB-CA-Chain.pem`（`?ssl=true`）。
 
 ### 拉 debug 日志（给 Cursor 读）
 
@@ -52,7 +52,7 @@ Local 和 Cloud 用**同一套** `PTRADE_DATABASE_URL`。SSL 使用 `assets/Apsa
 python3 tools/pull_logs.py
 ```
 
-默认拉线上 `https://ptrade.console.enrichlife.today`，写入 `logs/qmt-debug.log`。
+默认拉线上 `https://qmt.console.enrichlife.today`，写入 `logs/qmt-debug.log`。
 
 ### QMT 侧
 

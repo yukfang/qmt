@@ -17,12 +17,12 @@ function stripQuotes(value) {
 function parseMysqlUrl(raw) {
   const s = stripQuotes(raw);
   if (!s.startsWith("mysql://")) {
-    throw new Error("PTRADE_DATABASE_URL must start with mysql://");
+    throw new Error("QMT_DATABASE_URL must start with mysql://");
   }
   const rest = s.slice("mysql://".length);
   const at = rest.lastIndexOf("@");
   if (at < 0) {
-    throw new Error("PTRADE_DATABASE_URL missing host");
+    throw new Error("QMT_DATABASE_URL missing host");
   }
   const userinfo = rest.slice(0, at);
   const hostpart = rest.slice(at + 1);
@@ -66,10 +66,10 @@ function sslOption(urlSsl) {
 }
 
 function connectionConfig() {
-  if (process.env.PTRADE_DATABASE_URL) {
-    const parsed = parseMysqlUrl(process.env.PTRADE_DATABASE_URL);
+  if (process.env.QMT_DATABASE_URL) {
+    const parsed = parseMysqlUrl(process.env.QMT_DATABASE_URL);
     if (!parsed.host || !parsed.user || !parsed.database) {
-      throw new Error("PTRADE_DATABASE_URL is incomplete");
+      throw new Error("QMT_DATABASE_URL is incomplete");
     }
     return {
       host: parsed.host,
@@ -84,7 +84,7 @@ function connectionConfig() {
   const user = process.env.MYSQL_USER;
   const database = process.env.MYSQL_DATABASE;
   if (!host || !user || !database) {
-    throw new Error("Set PTRADE_DATABASE_URL or MYSQL_HOST/MYSQL_USER/MYSQL_DATABASE");
+    throw new Error("Set QMT_DATABASE_URL or MYSQL_HOST/MYSQL_USER/MYSQL_DATABASE");
   }
   return {
     host,
