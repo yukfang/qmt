@@ -1640,7 +1640,6 @@ function applyCruiseFromServer(state, stock) {
       hideHangBar();
       hideCancelBar();
     }
-    setMeta(locked ? "巡航中，页面已锁定" : "巡航中，可继续模拟");
   }
 }
 
@@ -1899,13 +1898,6 @@ function releaseCruiseLease(stock) {
   }).catch(() => {});
 }
 
-function noteCruiseLease(held) {
-  if (!cruiseOn) return;
-  const locked = !isSimMode();
-  const who = held ? "本机执行" : "另一台设备执行";
-  setMeta(locked ? `巡航中，${who}，页面已锁定` : `巡航中，${who}`);
-}
-
 async function postCruiseState(on) {
   const res = await fetch("/api/cruise", {
     method: "POST",
@@ -1916,8 +1908,6 @@ async function postCruiseState(on) {
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
   applyCruiseFromServer(data, selectedStock());
-  const locked = data.on && !isSimMode();
-  setMeta(data.on ? (locked ? "巡航中，页面已锁定" : "巡航中，可继续模拟") : "已退出巡航");
 }
 
 async function setCruise(on) {
@@ -2362,8 +2352,6 @@ async function cruiseTick(data) {
   rememberSessionDeals(data);
   if (!book.on) return;
   const lease = await renewCruiseLease(stock);
-  book.leaseHeld = lease.held;
-  if (stock === selectedStock()) noteCruiseLease(lease.held);
   if (!lease.held || book.busy) return;
   noteCruiseFails(data.failedHangs, stock);
   rememberSessionDeals(data);
