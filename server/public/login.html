@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>登录 · QMT Bridge</title>
+    <link rel="icon" type="image/svg+xml" href="./favicon-local.svg" />
+    <link rel="stylesheet" href="./style.css?v=0.8.2" />
+    <script src="./site-env.js?v=0.8.2"></script>
+  </head>
+  <body class="login-body">
+    <form id="login-form" class="login-card">
+      <h1>QMT Bridge</h1>
+      <p class="login-hint"><span id="env-badge" class="env-badge">—</span> 登录后查看控制台</p>
+      <label>用户名
+        <input id="username" name="username" autocomplete="username" required />
+      </label>
+      <label>密码
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <p id="login-error" class="login-error" hidden></p>
+      <button type="submit">登录</button>
+    </form>
+    <script src="./login.js?v=0.8.2"></script>
+  </body>
+</html>

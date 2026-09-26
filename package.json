@@ -1,0 +1,19 @@
+{
+  "name": "qmt-bridge",
+  "version": "0.9.35",
+  "private": true,
+  "description": "QMT account bridge: receive orders/deals from Galaxy QMT and show a web UI",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "mysql2": "^3.14.0"
+  }
+}

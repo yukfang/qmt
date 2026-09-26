@@ -1,0 +1,7 @@
+node_modules/
+logs/
+.cursor/
+*.publishsettings
+.azure/
+.env
+.DS_Store
