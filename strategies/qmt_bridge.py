@@ -10,7 +10,7 @@ QMT -> Web 桥接（只读）。不要回测。
 ACCOUNT = '220500068710'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
-BASE_URL = 'https://ptrade.console.enrichlife.today'
+BASE_URL = 'https://qmt.console.enrichlife.today'
 TOKEN = ''  # 若服务器设了 BRIDGE_TOKEN，这里填同一个
 POLL_SEC = 3
 
