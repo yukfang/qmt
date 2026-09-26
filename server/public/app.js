@@ -42,6 +42,7 @@ const REQUEST_FADE_MS = 3000;
 const HANG_BAR_IDLE_MS = 5000;
 const HANG_BAR_FADE_MS = 3000;
 
+const cruiseHolder = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 let lastMetaText = "";
 let lastSyncText = "";
 let refreshing = false;
@@ -1748,7 +1749,7 @@ function cruiseFillPlans(data, opts) {
       const need = target - (have.get(idx) || 0);
       if (need <= 0) continue;
       const qty = Math.floor(need / 100) * 100;
-      if (qty > 0) plans.push({ side, price: idxToPrice(idx, TICK), qty });
+      if (qty > 0) plans.push({ side, price: idxToPrice(idx, TICK), qty, coverQty: target });
     }
   }
   if (want.has("buy")) addSide("buy", buyCruise, -buyStep, buy);
@@ -1858,16 +1859,51 @@ function rememberPendingHang(order, fallback) {
   }
 }
 
-async function postHangOrder({ side, price, qty, stock, account, source }) {
+async function postHangOrder({ side, price, qty, stock, account, source, coverQty }) {
   const res = await fetch("/api/hang", {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ side, price, qty, stock, account, source }),
+    body: JSON.stringify({ side, price, qty, stock, account, source, coverQty }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  if (body.covered) return { covered: true };
   return body.order || {};
+}
+
+async function renewCruiseLease(stock) {
+  const res = await fetch("/api/cruise/lease", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cruiseBody({ holder: cruiseHolder }, stock)),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) return { held: false, reason: "missing" };
+  return { held: Boolean(data.held), reason: data.reason || "" };
+}
+
+function releaseCruiseLease(stock) {
+  const body = JSON.stringify(cruiseBody({ holder: cruiseHolder }, stock));
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon("/api/cruise/lease/release", new Blob([body], { type: "application/json" }));
+    return;
+  }
+  fetch("/api/cruise/lease/release", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body,
+    keepalive: true,
+  }).catch(() => {});
+}
+
+function noteCruiseLease(held) {
+  if (!cruiseOn) return;
+  const locked = !isSimMode();
+  const who = held ? "本机执行" : "另一台设备执行";
+  setMeta(locked ? `巡航中，${who}，页面已锁定` : `巡航中，${who}`);
 }
 
 async function postCruiseState(on) {
@@ -1902,12 +1938,15 @@ async function setCruise(on) {
       for (const plan of plans) {
         const label = plan.side === "sell" ? "卖挂" : "买挂";
         try {
+          const lease = await renewCruiseLease(selectedStock());
+          if (!lease.held && lease.reason === "busy") break;
           const order = await postHangOrder({
             ...plan,
             stock: getLastGoodData().stock,
             account: getLastGoodData().account,
             source: "cruise",
           });
+          if (order && order.covered) continue;
           rememberPendingHang(order, { ...plan, source: "cruise" });
         } catch (err) {
           const reason = `巡航补单失败：${label} ${plan.price.toFixed(3)} × ${plan.qty}：${err.message}`;
@@ -1918,6 +1957,8 @@ async function setCruise(on) {
       }
     }
     await postCruiseState(on);
+    if (on) await renewCruiseLease(selectedStock());
+    else releaseCruiseLease(selectedStock());
   } catch (err) {
     const reason = `巡航同步失败：${err.message}`;
     pushAlert(reason);
@@ -1950,6 +1991,8 @@ async function unclaimCruiseKey(kind, key, stock) {
 async function placeCruisePlans(data, plans, failPrefix) {
   const prefix = failPrefix || "巡航补档失败";
   for (const plan of plans) {
+    const lease = await renewCruiseLease(data.stock);
+    if (!lease.held) return;
     const label = plan.side === "sell" ? "卖挂" : "买挂";
     try {
       const order = await postHangOrder({
@@ -1958,6 +2001,7 @@ async function placeCruisePlans(data, plans, failPrefix) {
         account: data.account,
         source: "cruise",
       });
+      if (order && order.covered) continue;
       rememberPendingHang(order, { ...plan, stock: data.stock, source: "cruise" });
     } catch (err) {
       pushAlert(`${prefix}：${label} ${plan.price.toFixed(3)} × ${plan.qty}：${err.message}`);
@@ -2088,7 +2132,7 @@ function resumeCruisePlans(data) {
     if (rung.side === "sell" && askIdx > 0 && idx < askIdx) continue;
     if (rung.side === "buy" && bidIdx > 0 && idx > bidIdx) continue;
     const qty = Math.floor((rung.qty - have) / 100) * 100;
-    if (qty > 0) plans.push({ side: rung.side, price: rung.price, qty });
+    if (qty > 0) plans.push({ side: rung.side, price: rung.price, qty, coverQty: rung.qty });
   }
   return plans;
 }
@@ -2110,7 +2154,7 @@ function cruiseLadderIdxs(data, side) {
 
 function pushCruiseGap(plans, side, idx, have, target) {
   const qty = Math.floor((target - (have.get(idx) || 0)) / 100) * 100;
-  if (qty > 0) plans.push({ side, price: idxToPrice(idx, TICK), qty });
+  if (qty > 0) plans.push({ side, price: idxToPrice(idx, TICK), qty, coverQty: target });
 }
 
 function cruiseGapPlans(data) {
@@ -2283,7 +2327,7 @@ function seedCruisePlans(data) {
     for (let i = 0; i < profile.levels; i += 1) {
       const idx = start + dir * i;
       const qty = Math.floor((target - (have.get(idx) || 0)) / 100) * 100;
-      if (qty > 0) plans.push({ side, price: idxToPrice(idx, TICK), qty });
+      if (qty > 0) plans.push({ side, price: idxToPrice(idx, TICK), qty, coverQty: target });
     }
   }
   add("sell", sellIdx, sellStep, covered.sell);
@@ -2314,9 +2358,13 @@ async function cruiseTick(data) {
   if (!data) return;
   const stock = normalizeStockId(data.stock || selectedStock());
   const book = cruiseBook(stock);
-  if (!book.loaded || book.busy) return;
+  if (!book.loaded) return;
   rememberSessionDeals(data);
   if (!book.on) return;
+  const lease = await renewCruiseLease(stock);
+  book.leaseHeld = lease.held;
+  if (stock === selectedStock()) noteCruiseLease(lease.held);
+  if (!lease.held || book.busy) return;
   noteCruiseFails(data.failedHangs, stock);
   rememberSessionDeals(data);
   rememberLiveCruiseRungs(data);
@@ -2365,6 +2413,8 @@ async function cruiseTick(data) {
         continue;
       }
       try {
+        const still = await renewCruiseLease(stock);
+        if (!still.held) break;
         const order = await postHangOrder({
           side: plan.side,
           price: plan.price,
@@ -2373,6 +2423,10 @@ async function cruiseTick(data) {
           account: data.account,
           source: "cruise",
         });
+        if (order && order.covered) {
+          for (const key of plan.keys) book.seenDeals.add(key);
+          continue;
+        }
         rememberPendingHang(order, { side: plan.side, stock: data.stock || stock, source: "cruise" });
         for (const key of plan.keys) book.seenDeals.add(key);
       } catch (err) {
@@ -2576,6 +2630,10 @@ async function switchStock(id) {
   });
 }
 
+
+window.addEventListener("pagehide", () => {
+  for (const s of STOCKS) releaseCruiseLease(s.id);
+});
 
 restoreCruise();
 refresh().catch((err) => {

@@ -172,7 +172,12 @@ app.post(
         price: body.price,
         qty: body.qty,
         source: body.source || "ui",
+        coverQty: body.coverQty,
       });
+      if (row && row.covered) {
+        res.json({ ok: true, covered: true });
+        return;
+      }
       res.json({ ok: true, order: row });
     } catch (err) {
       const status = err.status || 500;
@@ -282,6 +287,26 @@ app.post(
       body.prevDeal
     );
     res.json({ ok: true, ...state });
+  })
+);
+
+app.post(
+  "/api/cruise/lease",
+  auth.requireUser,
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const out = await db.renewCruiseLease(req.username, body.channel, body.stock, body.holder);
+    res.json({ ok: true, ...out });
+  })
+);
+
+app.post(
+  "/api/cruise/lease/release",
+  auth.requireUser,
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const out = await db.releaseCruiseLease(req.username, body.channel, body.stock, body.holder);
+    res.json({ ok: true, ...out });
   })
 );
 

@@ -179,6 +179,8 @@ async function ensureSchema() {
     )
   `);
   await ensureColumn("user_cruise", "rungs_json", "TEXT NULL");
+  await ensureColumn("user_cruise", "lease_holder", "VARCHAR(64) NULL");
+  await ensureColumn("user_cruise", "lease_until", "DATETIME(3) NULL");
   await ensureCruiseChannelWidth();
 }
 
@@ -443,7 +445,7 @@ function roundPrice(price) {
   return Math.round(Number(price) * 1000) / 1000;
 }
 
-async function createHangOrder({ account, stock, side, price, qty, source = "ui" }) {
+async function createHangOrder({ account, stock, side, price, qty, source = "ui", coverQty = 0 }) {
   const s = String(side || "").toLowerCase();
   if (s !== "buy" && s !== "sell") {
     const err = new Error("side must be buy or sell");
@@ -487,12 +489,86 @@ async function createHangOrder({ account, stock, side, price, qty, source = "ui"
   }
 
   const db = getPool();
+  const cover = Math.round(Number(coverQty) || 0);
+  if (source === "cruise" && cover > 0) {
+    const placed = await insertCruiseHang({
+      db,
+      account: snapAccount,
+      stock: snapStock,
+      side: s,
+      price: px,
+      qty: q,
+      coverQty: cover,
+      source,
+      snapshot,
+    });
+    return placed;
+  }
   const [result] = await db.query(
     `INSERT INTO pending_orders (account, stock, side, price, qty, status, source, action)
      VALUES (?, ?, ?, ?, ?, 'pending', ?, 'hang')`,
     [snapAccount, snapStock, s, px, q, source]
   );
   return getHangOrder(result.insertId);
+}
+
+const OPEN_HANG_STATUS = new Set([48, 49, 50, 51, 52, 55]);
+
+function snapshotOpenQty(snapshot, side, price) {
+  const rows = snapshot && snapshot.orders && snapshot.orders.length ? snapshot.orders : (snapshot && snapshot.openOrders) || [];
+  let qty = 0;
+  for (const row of rows) {
+    const status = Number(row.m_nOrderStatus || row.status);
+    const remaining = Number(row.m_nVolumeTotal);
+    if (!OPEN_HANG_STATUS.has(status) || !(remaining > 0)) continue;
+    const name = String(row.m_strOptName || row.side || "");
+    const rowSide = name.includes("卖") ? "sell" : name.includes("买") ? "buy" : "";
+    if (rowSide !== side) continue;
+    if (roundPrice(row.m_dLimitPrice || row.price) !== price) continue;
+    qty += remaining;
+  }
+  return qty;
+}
+
+async function insertCruiseHang({ db, account, stock, side, price, qty, coverQty, source, snapshot }) {
+  const lockName = `qmt:${stock}:${side}:${price}`.slice(0, 64);
+  const conn = await db.getConnection();
+  try {
+    const [lockRows] = await conn.query(`SELECT GET_LOCK(?, 5) AS locked`, [lockName]);
+    if (!lockRows[0] || Number(lockRows[0].locked) !== 1) {
+      const err = new Error("挂单锁超时");
+      err.status = 503;
+      throw err;
+    }
+    try {
+      const { code, short } = stockCodeVariants(stock);
+      const [pendRows] = await conn.query(
+        `SELECT COALESCE(SUM(qty), 0) AS qty
+         FROM pending_orders
+         WHERE status IN ('pending', 'claimed')
+           AND (action = 'hang' OR action IS NULL OR action = '')
+           AND stock NOT LIKE '%|C|%'
+           AND (stock = ? OR stock = ?)
+           AND side = ?
+           AND ROUND(price, 3) = ?`,
+        [code, short, side, price]
+      );
+      const have = snapshotOpenQty(snapshot, side, price) + Number(pendRows[0] && pendRows[0].qty);
+      const room = Math.floor((coverQty - have) / 100) * 100;
+      if (!(room > 0)) return { covered: true };
+      const placeQty = Math.min(qty, room);
+      const [result] = await conn.query(
+        `INSERT INTO pending_orders (account, stock, side, price, qty, status, source, action)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, 'hang')`,
+        [account, stock, side, price, placeQty, source]
+      );
+      return getHangOrder(result.insertId);
+    } finally {
+      await conn.query(`SELECT RELEASE_LOCK(?)`, [lockName]);
+    }
+  } finally {
+    conn.release();
+  }
 }
 
 async function getHangOrder(id) {
@@ -781,6 +857,12 @@ async function setCruiseState(username, channel, on, stock) {
      ON DUPLICATE KEY UPDATE cruise_on = VALUES(cruise_on)`,
     [username, ch, on ? 1 : 0]
   );
+  if (!on) {
+    await db.query(
+      `UPDATE user_cruise SET lease_holder = NULL, lease_until = NULL WHERE username = ? AND channel = ?`,
+      [username, ch]
+    );
+  }
   if (on) {
     const code = ch.split(":")[1] || "";
     const snap = await getSnapshot(0, code);
@@ -823,6 +905,46 @@ async function saveCruiseRungs(username, channel, stock, rungs, dropped, lastDea
     [username, ch, JSON.stringify(book)]
   );
   return getCruiseState(username, channel, stock);
+}
+
+async function renewCruiseLease(username, channel, stock, holder) {
+  const ch = cruiseChannel(channel, stock);
+  const id = String(holder || "").trim().slice(0, 64);
+  if (!id) return { held: false, reason: "missing" };
+  const db = getPool();
+  const [result] = await db.query(
+    `UPDATE user_cruise
+     SET lease_holder = ?, lease_until = DATE_ADD(NOW(3), INTERVAL 20 SECOND)
+     WHERE username = ? AND channel = ?
+       AND (
+         lease_holder IS NULL
+         OR lease_holder = ?
+         OR lease_until IS NULL
+         OR lease_until < NOW(3)
+       )`,
+    [id, username, ch, id]
+  );
+  if (result.affectedRows) return { held: true };
+  const [rows] = await db.query(
+    `SELECT username FROM user_cruise WHERE username = ? AND channel = ?`,
+    [username, ch]
+  );
+  if (!rows.length) return { held: false, reason: "missing" };
+  return { held: false, reason: "busy" };
+}
+
+async function releaseCruiseLease(username, channel, stock, holder) {
+  const ch = cruiseChannel(channel, stock);
+  const id = String(holder || "").trim().slice(0, 64);
+  if (!id) return { ok: true };
+  const db = getPool();
+  await db.query(
+    `UPDATE user_cruise
+     SET lease_holder = NULL, lease_until = NULL
+     WHERE username = ? AND channel = ? AND lease_holder = ?`,
+    [username, ch, id]
+  );
+  return { ok: true };
 }
 
 async function claimCruiseSeen(username, channel, kind, key, stock) {
@@ -870,6 +992,8 @@ module.exports = {
   getCruiseState,
   setCruiseState,
   saveCruiseRungs,
+  renewCruiseLease,
+  releaseCruiseLease,
   claimCruiseSeen,
   unclaimCruiseSeen,
 };
