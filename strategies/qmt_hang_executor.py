@@ -16,7 +16,7 @@ TOKEN = ''
 ACCOUNT = '220500068710'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
-BASE_URL = 'https://ptrade.console.enrichlife.today'
+BASE_URL = 'https://qmt.console.enrichlife.today'
 POLL_SEC = 2
 STRATEGY_NAME = 'qmt_hang_exec'
 
