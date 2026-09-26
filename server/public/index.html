@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>QMT Bridge</title>
     <link rel="icon" type="image/svg+xml" href="./favicon-local.svg" />
-    <link rel="stylesheet" href="./style.css?v=0.9.33" />
+    <link rel="stylesheet" href="./style.css?v=0.9.40" />
     <script src="./site-env.js?v=0.9.1"></script>
   </head>
   <body>
@@ -34,21 +34,23 @@
           <span class="title-meta-sep" aria-hidden="true"></span>
           <p id="latest-sync">Latest Sync: --</p>
         </div>
-        <nav id="stock-switch" class="stock-switch" aria-label="股票"></nav>
       </div>
       <p id="stock-title" class="stock-title">—</p>
       <p id="meta">等待 QMT 推送…</p>
-      <div class="toolbar">
-        <label class="qty-control">
-          <span>默认数量</span>
-          <strong id="hang-qty-value">10000</strong>
-          <input id="hang-qty" type="range" min="5000" max="15000" step="1000" value="10000" />
-        </label>
+      <label class="qty-control">
+        <span>默认数量</span>
+        <strong id="hang-qty-value">10000</strong>
+        <input id="hang-qty" type="range" min="5000" max="15000" step="1000" value="10000" />
+      </label>
+    </header>
+    <div class="pin-bar">
+      <nav id="stock-switch" class="stock-switch" aria-label="股票"></nav>
+      <div class="pin-actions">
         <button type="button" id="cruise-btn" class="cruise-btn">巡航</button>
         <button type="button" id="cancel-buys" class="cancel-all-btn buy">买单全撤</button>
         <button type="button" id="cancel-sells" class="cancel-all-btn sell">卖单全撤</button>
       </div>
-    </header>
+    </div>
     <main>
       <section class="ladder-section">
         <div class="ladder-head">
