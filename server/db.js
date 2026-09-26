@@ -66,10 +66,11 @@ function sslOption(urlSsl) {
 }
 
 function connectionConfig() {
-  if (process.env.QMT_DATABASE_URL) {
-    const parsed = parseMysqlUrl(process.env.QMT_DATABASE_URL);
+  const databaseUrl = process.env.QMT_DATABASE_URL || process.env.PTRADE_DATABASE_URL;
+  if (databaseUrl) {
+    const parsed = parseMysqlUrl(databaseUrl);
     if (!parsed.host || !parsed.user || !parsed.database) {
-      throw new Error("QMT_DATABASE_URL is incomplete");
+      throw new Error("QMT_DATABASE_URL/PTRADE_DATABASE_URL is incomplete");
     }
     return {
       host: parsed.host,
@@ -84,7 +85,7 @@ function connectionConfig() {
   const user = process.env.MYSQL_USER;
   const database = process.env.MYSQL_DATABASE;
   if (!host || !user || !database) {
-    throw new Error("Set QMT_DATABASE_URL or MYSQL_HOST/MYSQL_USER/MYSQL_DATABASE");
+    throw new Error("Set QMT_DATABASE_URL/PTRADE_DATABASE_URL or MYSQL_HOST/MYSQL_USER/MYSQL_DATABASE");
   }
   return {
     host,
@@ -127,7 +128,6 @@ async function ensureSchema() {
   await ensureColumn("sync_snapshot", "content_hash", "VARCHAR(40) NOT NULL DEFAULT ''");
   await ensureColumn("sync_snapshot", "version", "BIGINT NOT NULL DEFAULT 0");
   await ensureIndex("sync_snapshot", "idx_sync_stock", "stock");
-  await ensureIndex("pending_orders", "idx_pending_stock_status", "stock, status");
   await backfillSnapshotVersions();
   await db.query(`
     CREATE TABLE IF NOT EXISTS debug_log (
@@ -159,6 +159,7 @@ async function ensureSchema() {
   `);
   await ensureColumn("pending_orders", "action", "VARCHAR(16) NOT NULL DEFAULT 'hang'");
   await ensureColumn("pending_orders", "target_order_id", "VARCHAR(64) NULL");
+  await ensureIndex("pending_orders", "idx_pending_stock_status", "stock, status");
   await db.query(`
     CREATE TABLE IF NOT EXISTS user_cruise (
       username VARCHAR(64) NOT NULL,
