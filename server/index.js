@@ -236,24 +236,58 @@ const readLogs = asyncHandler(async (req, res) => {
 });
 
 const STRATEGY_DIR = path.join(__dirname, "..", "strategies");
-const STRATEGIES = {
-  order_status: "qmt_order_status.py",
-  order_exec: "qmt_order_exec.py",
-};
+const STRATEGY_REGISTRY = path.join(STRATEGY_DIR, "registry.json");
+const STRATEGY_ID_RE = /^[a-z0-9_]{1,48}$/;
 
-function readStrategy(id) {
-  const file = STRATEGIES[id];
-  if (!file) return null;
-  const code = require("fs").readFileSync(path.join(STRATEGY_DIR, file), "utf8");
+// Read on every request so registry/file edits take effect without restarting the server.
+function loadRegistry() {
+  const fs = require("fs");
+  const raw = JSON.parse(fs.readFileSync(STRATEGY_REGISTRY, "utf8"));
+  const out = {};
+  for (const [id, entry] of Object.entries(raw || {})) {
+    if (!STRATEGY_ID_RE.test(id) || !entry || typeof entry.file !== "string") continue;
+    const file = path.basename(entry.file);
+    if (!file.endsWith(".py")) continue;
+    out[id] = {
+      file,
+      description: String(entry.description || ""),
+      params: entry.params && typeof entry.params === "object" ? entry.params : {},
+      disabled: Boolean(entry.disabled),
+    };
+  }
+  return out;
+}
+
+function readStrategy(registry, id) {
+  const entry = registry[id];
+  if (!entry || entry.disabled) return null;
+  const fs = require("fs");
+  const full = path.join(STRATEGY_DIR, entry.file);
+  if (!fs.existsSync(full)) {
+    const err = new Error(`策略 ${id} 登记的文件不存在：${entry.file}`);
+    err.status = 500;
+    throw err;
+  }
+  const code = fs.readFileSync(full, "utf8");
   const sha256 = require("crypto").createHash("sha256").update(code, "utf8").digest("hex");
   const m = code.match(/^STRATEGY_VERSION\s*=\s*['"]([^'"]+)['"]/m);
-  return { id, file, version: m ? m[1] : "", sha256, bytes: Buffer.byteLength(code, "utf8"), code };
+  return {
+    id,
+    file: entry.file,
+    description: entry.description,
+    version: m ? m[1] : "",
+    params: entry.params,
+    sha256,
+    bytes: Buffer.byteLength(code, "utf8"),
+    code,
+  };
 }
 
 app.use("/api/strategies", (req, res, next) => {
   const started = Date.now();
   const tokenAtStart = tokenState(req);
   res.on("finish", () => {
+    if (String(req.query.meta || "") === "1" && res.statusCode === 200) return;
     const ua = String(req.get("user-agent") || "").slice(0, 80);
     const ip = String(req.get("cf-connecting-ip") || req.get("x-forwarded-for") || req.ip || "").split(",")[0].trim();
     const reason = res.get("X-QMT-Reason") || "";
@@ -272,10 +306,14 @@ app.get(
   "/api/strategies",
   checkToken,
   asyncHandler(async (_req, res) => {
-    const items = Object.keys(STRATEGIES).map((id) => {
-      const { code, ...meta } = readStrategy(id);
-      return meta;
-    });
+    const registry = loadRegistry();
+    const items = [];
+    for (const id of Object.keys(registry)) {
+      const found = readStrategy(registry, id);
+      if (!found) continue;
+      const { code, ...meta } = found;
+      items.push(meta);
+    }
     res.json({ ok: true, items });
   })
 );
@@ -284,10 +322,29 @@ app.get(
   "/api/strategies/:id",
   checkToken,
   asyncHandler(async (req, res) => {
-    const id = String(req.params.id || "");
-    const found = readStrategy(id);
+    const id = String(req.params.id || "").trim().toLowerCase();
+    if (!STRATEGY_ID_RE.test(id)) {
+      sendFail(req, res, 400, "STRATEGY_ID_INVALID", `策略 id 只能是小写字母、数字、下划线：${req.params.id}`);
+      return;
+    }
+    const registry = loadRegistry();
+    const available = Object.keys(registry).filter((k) => !registry[k].disabled);
+    const found = readStrategy(registry, id);
     if (!found) {
-      sendFail(req, res, 404, "STRATEGY_NOT_FOUND", `没有这个策略：${id}`, { available: Object.keys(STRATEGIES) });
+      const disabled = registry[id] && registry[id].disabled;
+      sendFail(
+        req,
+        res,
+        404,
+        disabled ? "STRATEGY_DISABLED" : "STRATEGY_NOT_FOUND",
+        disabled ? `策略 ${id} 已停用` : `没有这个策略：${id}`,
+        { available }
+      );
+      return;
+    }
+    if (String(req.query.meta || "") === "1") {
+      const { code, ...meta } = found;
+      res.json({ ok: true, ...meta });
       return;
     }
     res.json({ ok: true, ...found });

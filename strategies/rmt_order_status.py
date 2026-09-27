@@ -1,4 +1,7 @@
 #coding:gbk
+TOKEN = ''  # 若服务器设了 BRIDGE_TOKEN，这里填同一个
+ACCOUNT = '220500068710'
+
 """
 QMT -> Web 桥接（只读）。不要回测。
 
@@ -6,9 +9,7 @@ QMT -> Web 桥接（只读）。不要回测。
 优先用 ContextInfo.run_time；否则在 init 里阻塞轮询（点「运行」也不会只跑一次就退出）。
 不下单、不撤单。
 """
-TOKEN = ''  # 若服务器设了 BRIDGE_TOKEN，这里填同一个
-STRATEGY_VERSION = 'status-v2'
-ACCOUNT = '220500068710'
+STRATEGY_VERSION = 'status-v3'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
 BASE_URL = 'https://qmt-console.enrichlife.today'
@@ -410,6 +411,15 @@ def init(ContextInfo):
 
 def handlebar(ContextInfo):
     return
+
+
+# 远程加载器热更新时保留的全局变量；定时周期或回调名变化仍需重启策略
+RELOAD_KEEP = ['_LOG_BUF', '_LOG_STATE']
+
+
+def on_reload(ContextInfo):
+    _debug(ContextInfo, 'reloaded %s poll=%ss' % (STRATEGY_VERSION, POLL_SEC))
+    _flush_debug(ContextInfo)
 
 
 def _sync_once(ContextInfo):

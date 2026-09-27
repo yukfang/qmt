@@ -3,7 +3,7 @@
 从 Web 拉取 UI 发起的买挂/卖挂，并在实盘执行。
 
 必须「交易」里实盘启动，不要回测。
-与 qmt_order_status.py 可同时运行：订单状态推送与订单执行并行，互不干扰。
+与 rmt_order_status.py 可同时运行：订单状态推送与订单执行并行，互不干扰。
 
 流程：
   GET  /api/commands
@@ -13,7 +13,7 @@
   POST /api/commands/{id}/result
 """
 TOKEN = ''
-STRATEGY_VERSION = 'exec-v2'
+STRATEGY_VERSION = 'exec-v3'
 ACCOUNT = '220500068710'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
@@ -387,3 +387,12 @@ def init(ContextInfo):
 
 def handlebar(ContextInfo):
     return
+
+
+# 远程加载器热更新时保留的全局变量；定时周期或回调名变化仍需重启策略
+RELOAD_KEEP = ['_LOG_BUF', '_LOG_STATE']
+
+
+def on_reload(ContextInfo):
+    _debug(ContextInfo, 'reloaded %s poll=%ss' % (STRATEGY_VERSION, POLL_SEC))
+    _flush_debug(ContextInfo)

@@ -21,7 +21,7 @@ Local Console  / Cloud UI      --读--> MySQL
 | 编号 | 内容 | 状态 |
 |---|---|---|
 | [1] | QMT 拉挂盘/委托/成交并 POST 到服务器 | 已通 |
-| [2] | 服务器下发挂单，QMT 执行 | UI 写 `pending_orders`；`qmt_hang_executor.py` 轮询执行 |
+| [2] | 服务器下发挂单，QMT 执行 | UI 写 `pending_orders`；`order_exec` 策略轮询执行 |
 | [3] | Web UI 展示挂盘/委托/成交 | 已有表格；改读 MySQL |
 | [4] | debug 写入 `debug_log` 表 | 进行中 |
 | 鉴权 | 网站登录 | 进行中：已加登录页；挂单/策略 API 下一步 |
@@ -63,11 +63,34 @@ node tools/logs.js -q claim -f      # 关键字 + 持续跟踪
 
 `python3 tools/pull_logs.py` 持续拉 `/api/logs` 写到 `logs/qmt-debug.log`。
 
+### 远程策略（QMT 只放一个加载器）
+
+`strategies/test_rmt_strategy.py` 顶部只改参数：`TOKEN`、`STRATEGY_ID`、`PARAMS`（覆盖远程策略里的全局变量）。挂在行情图上运行（日志出现 `[quote]start simulation mode`）。
+
+服务器按 `strategies/registry.json` 下发：
+
+```json
+{ "order_status": { "file": "rmt_order_status.py", "description": "...", "params": {} } }
+```
+
+- 新增策略：把 `.py` 放进 `strategies/`，在 registry 里加一项，部署。id 只能用小写字母、数字、下划线
+- `params` 是服务器端默认参数，加载器里的 `PARAMS` 优先；`"disabled": true` 停用
+- 策略文件里写 `STRATEGY_VERSION = '...'`，下载和日志里会显示版本
+- `GET /api/strategies` 列表，`GET /api/strategies/{id}` 下载（需要 `X-Bridge-Token`）
+
 ### QMT 侧
 
-1. `qmt_bridge.py`：实盘启动，推委托/成交/买1卖1（只读）
-2. `qmt_hang_executor.py`：另开一条实盘策略，轮询 `/api/commands` 并 `passorder` 限价挂单
-3. 不要回测。两个策略可同时跑
+每个策略有两份内容相同的文件，只有 `STRATEGY_VERSION` 前缀不同：
+
+| 策略 | 远程版（服务器下发给加载器） | 本地版（直接粘进 QMT 运行） |
+|---|---|---|
+| 推送委托/成交/买1卖1（只读） | `rmt_order_status.py` | `local_order_status.py` |
+| 执行 UI 挂单/撤单 | `rmt_order_exec.py` | `local_order_exec.py` |
+
+1. 平时用加载器 `test_rmt_strategy.py` 跑远程版；加载器或服务器有问题时，把本地版粘进 QMT 直接运行（顶部填 `TOKEN`）
+2. 同一个策略不要远程版和本地版同时跑
+3. 改策略时两份一起改，版本号一起加
+4. 不要回测。推送和执行两个策略可同时跑
 4. UI：买1及下方点价格 → 确认买挂；卖1及上方点价格 → 确认卖挂；默认数量 10000，滑条左右各 5 格（1000），拉到端点后窗口平移
 
 ## 已确认能用
@@ -83,8 +106,9 @@ node tools/logs.js -q claim -f      # 关键字 + 持续跟踪
 
 - `strategies/tick_push_once.py`：tick 快照 POST httpcan（已验证）
 - `strategies/account_orders_deals.py`：实盘打印挂盘/成交明细（已验证）
-- `strategies/qmt_bridge.py`：持续推 sync + debug 到 Web
-- `strategies/qmt_hang_executor.py`：拉取 pending 挂单并实盘 `passorder`
+- `strategies/rmt_order_status.py` / `local_order_status.py`：持续推 sync + 日志到 Web
+- `strategies/rmt_order_exec.py` / `local_order_exec.py`：拉取 pending 挂单/撤单并实盘执行
+- `strategies/test_rmt_strategy.py`：远程策略加载器；`strategies/registry.json`：下发清单
 - `server/`：Express；写入/读取 MySQL
 - `server/schema.sql`：表结构
 - `tools/logs.js`：直接查 `debug_log` 看策略日志

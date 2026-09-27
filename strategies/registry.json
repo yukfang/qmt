@@ -1,0 +1,12 @@
+{
+  "order_status": {
+    "file": "rmt_order_status.py",
+    "description": "只读推送：委托、成交、买1卖1 -> /api/sync",
+    "params": {}
+  },
+  "order_exec": {
+    "file": "rmt_order_exec.py",
+    "description": "执行 UI 发起的挂单/撤单：轮询 /api/commands 并 passorder / cancel",
+    "params": {}
+  }
+}
