@@ -6,12 +6,11 @@ QMT -> Web 桥接（只读）。不要回测。
 优先用 ContextInfo.run_time；否则在 init 里阻塞轮询（点「运行」也不会只跑一次就退出）。
 不下单、不撤单。
 """
-
+TOKEN = ''  # 若服务器设了 BRIDGE_TOKEN，这里填同一个
 ACCOUNT = '220500068710'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
 BASE_URL = 'https://qmt-console.enrichlife.today'
-TOKEN = ''  # 若服务器设了 BRIDGE_TOKEN，这里填同一个
 POLL_SEC = 3
 
 OPEN_STATUS = set([48, 49, 50, 51, 52, 55])

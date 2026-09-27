@@ -3,7 +3,7 @@
 从 Web 拉取 UI 发起的买挂/卖挂，并在实盘执行。
 
 必须「交易」里实盘启动，不要回测。
-与 qmt_bridge.py 可同时运行：bridge 只读推送，本策略只负责下单。
+与 qmt_order_status.py 可同时运行：订单状态推送与订单执行并行，互不干扰。
 
 流程：
   GET  /api/commands

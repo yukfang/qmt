@@ -235,6 +235,46 @@ const readLogs = asyncHandler(async (req, res) => {
   res.json({ ok: true, ...result });
 });
 
+const STRATEGY_DIR = path.join(__dirname, "..", "strategies");
+const STRATEGIES = {
+  order_status: "qmt_order_status.py",
+  order_exec: "qmt_order_exec.py",
+};
+
+function readStrategy(id) {
+  const file = STRATEGIES[id];
+  if (!file) return null;
+  const code = require("fs").readFileSync(path.join(STRATEGY_DIR, file), "utf8");
+  const sha256 = require("crypto").createHash("sha256").update(code, "utf8").digest("hex");
+  return { id, file, sha256, bytes: Buffer.byteLength(code, "utf8"), code };
+}
+
+app.get(
+  "/api/strategies",
+  checkToken,
+  asyncHandler(async (_req, res) => {
+    const items = Object.keys(STRATEGIES).map((id) => {
+      const { code, ...meta } = readStrategy(id);
+      return meta;
+    });
+    res.json({ ok: true, items });
+  })
+);
+
+app.get(
+  "/api/strategies/:id",
+  checkToken,
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id || "");
+    const found = readStrategy(id);
+    if (!found) {
+      sendFail(req, res, 404, "STRATEGY_NOT_FOUND", `没有这个策略：${id}`, { available: Object.keys(STRATEGIES) });
+      return;
+    }
+    res.json({ ok: true, ...found });
+  })
+);
+
 app.post(["/api/logs", "/api/debug"], writeLogs);
 app.get(["/api/logs", "/api/debug"], allowBridgeOrConsole, readLogs);
 
