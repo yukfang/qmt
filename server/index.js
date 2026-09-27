@@ -49,34 +49,85 @@ app.get(["/", "/index.html"], auth.requirePageLogin, (req, res) => {
 
 app.use(express.static(path.join(__dirname, "public")));
 
-function unauthorized(res) {
-  res.status(401).json({ ok: false, error: "unauthorized" });
+function fingerprint(value) {
+  if (!value) return "";
+  return require("crypto").createHash("sha256").update(String(value)).digest("hex").slice(0, 8);
+}
+
+function sendFail(req, res, status, code, error, extra = {}) {
+  res.set("X-QMT-Reason", code);
+  res.status(status).json({
+    ok: false,
+    code,
+    error,
+    method: req.method,
+    path: req.originalUrl.split("?")[0],
+    ...extra,
+  });
+}
+
+function bridgeToken(req) {
+  const header = req.get("x-bridge-token");
+  if (header != null) return { got: header, from: "header X-Bridge-Token" };
+  if (req.query.token != null) return { got: String(req.query.token), from: "query token" };
+  return { got: "", from: "" };
+}
+
+function tokenFailure(req, res, { allowCookie = false } = {}) {
+  const { got, from } = bridgeToken(req);
+  const tokenInfo = {
+    expectedLength: TOKEN.length,
+    expectedFingerprint: fingerprint(TOKEN),
+    receivedFrom: from || "none",
+    receivedLength: got.length,
+    receivedFingerprint: fingerprint(got),
+    cookieSession: allowCookie ? Boolean(auth.readSession(req)) : undefined,
+  };
+  if (!got) {
+    sendFail(
+      req,
+      res,
+      401,
+      "BRIDGE_TOKEN_MISSING",
+      allowCookie
+        ? "未登录网页，且请求没有带 X-Bridge-Token；服务器已配置 BRIDGE_TOKEN，策略里的 TOKEN 需要填成相同的值"
+        : "请求没有带 X-Bridge-Token；服务器已配置 BRIDGE_TOKEN，策略里的 TOKEN 需要填成相同的值",
+      tokenInfo
+    );
+    return;
+  }
+  if (got.trim() === TOKEN) {
+    sendFail(req, res, 401, "BRIDGE_TOKEN_WHITESPACE", "X-Bridge-Token 首尾带有空格或换行，去掉后才与 BRIDGE_TOKEN 一致", tokenInfo);
+    return;
+  }
+  sendFail(
+    req,
+    res,
+    401,
+    "BRIDGE_TOKEN_MISMATCH",
+    "X-Bridge-Token 与服务器 BRIDGE_TOKEN 不一致；可对比两边的 length 和 fingerprint（sha256 前 8 位）",
+    tokenInfo
+  );
 }
 
 function checkToken(req, res, next) {
   if (!TOKEN) {
     return next();
   }
-  const got = req.get("x-bridge-token") || req.query.token || "";
-  if (got !== TOKEN) {
-    return unauthorized(res);
-  }
-  return next();
+  if (bridgeToken(req).got === TOKEN) return next();
+  return tokenFailure(req, res);
 }
 
 /** Console UI (cookie) or strategy (bridge token). */
 function allowBridgeOrConsole(req, res, next) {
-  if (TOKEN) {
-    const got = req.get("x-bridge-token") || req.query.token || "";
-    if (got === TOKEN) return next();
-  }
+  if (TOKEN && bridgeToken(req).got === TOKEN) return next();
   const user = auth.currentUser(req);
   if (user) {
     req.username = user;
     return next();
   }
   if (!TOKEN) return next();
-  return unauthorized(res);
+  return tokenFailure(req, res, { allowCookie: true });
 }
 
 function asyncHandler(fn) {
@@ -119,7 +170,7 @@ app.get(
   asyncHandler(async (req, res) => {
     const stock = String(req.query.stock || "").trim();
     if (!stock) {
-      res.status(400).json({ ok: false, error: "stock required" });
+      sendFail(req, res, 400, "STOCK_REQUIRED", "缺少 stock 参数，例如 ?stock=159781.SZ");
       return;
     }
     res.json(await db.getSnapshot(Number(req.query.since || 0), stock));
@@ -180,8 +231,7 @@ app.post(
       }
       res.json({ ok: true, order: row });
     } catch (err) {
-      const status = err.status || 500;
-      res.status(status).json({ ok: false, error: err.message || "hang failed" });
+      sendFail(req, res, err.status || 500, err.status ? "HANG_REJECTED" : "HANG_ERROR", err.message || "hang failed");
     }
   })
 );
@@ -203,8 +253,7 @@ app.post(
       });
       res.json({ ok: true, order: row });
     } catch (err) {
-      const status = err.status || 500;
-      res.status(status).json({ ok: false, error: err.message || "cancel failed" });
+      sendFail(req, res, err.status || 500, err.status ? "CANCEL_REJECTED" : "CANCEL_ERROR", err.message || "cancel failed");
     }
   })
 );
@@ -213,9 +262,18 @@ app.post(
   "/api/commands/:id/claim",
   checkToken,
   asyncHandler(async (req, res) => {
-    const row = await db.claimHangOrder(Number(req.params.id));
+    const id = Number(req.params.id);
+    const row = await db.claimHangOrder(id);
     if (!row) {
-      res.status(409).json({ ok: false, error: "not pending" });
+      const cur = await db.getHangOrder(id);
+      sendFail(
+        req,
+        res,
+        409,
+        cur ? "COMMAND_NOT_PENDING" : "COMMAND_NOT_FOUND",
+        cur ? `指令 #${id} 当前状态是 ${cur.status}，不能再领取` : `指令 #${id} 不存在`,
+        cur ? { commandStatus: cur.status } : {}
+      );
       return;
     }
     res.json({
@@ -240,13 +298,22 @@ app.post(
   allowBridgeOrConsole,
   asyncHandler(async (req, res) => {
     const body = req.body || {};
-    const row = await db.finishHangOrder(Number(req.params.id), {
+    const id = Number(req.params.id);
+    const row = await db.finishHangOrder(id, {
       ok: Boolean(body.ok),
       brokerOrderId: body.brokerOrderId || body.orderId || "",
       errorMessage: body.error || body.errorMessage || "",
     });
     if (!row) {
-      res.status(409).json({ ok: false, error: "not claimable" });
+      const cur = await db.getHangOrder(id);
+      sendFail(
+        req,
+        res,
+        409,
+        cur ? "COMMAND_ALREADY_FINISHED" : "COMMAND_NOT_FOUND",
+        cur ? `指令 #${id} 当前状态是 ${cur.status}，不能再回报结果` : `指令 #${id} 不存在`,
+        cur ? { commandStatus: cur.status } : {}
+      );
       return;
     }
     res.json({ ok: true, order: row });
@@ -330,9 +397,24 @@ app.post(
   })
 );
 
-app.use((err, _req, res, _next) => {
+app.use("/api", (req, res) => {
+  sendFail(req, res, 404, "API_NOT_FOUND", `没有这个接口：${req.method} ${req.originalUrl.split("?")[0]}`);
+});
+
+app.use((err, req, res, _next) => {
+  if (err && err.type === "entity.parse.failed") {
+    sendFail(req, res, 400, "BAD_JSON", `请求体不是合法 JSON：${err.message}`);
+    return;
+  }
+  if (err && err.type === "entity.too.large") {
+    sendFail(req, res, 413, "BODY_TOO_LARGE", `请求体超过 2mb 上限：${err.message}`);
+    return;
+  }
   console.error(err);
-  res.status(500).json({ ok: false, error: err.message || "server error" });
+  const status = Number(err && err.status) || 500;
+  sendFail(req, res, status, status >= 500 ? "SERVER_ERROR" : "REQUEST_ERROR", (err && err.message) || "server error", {
+    detail: err && err.code ? String(err.code) : undefined,
+  });
 });
 
 async function main() {

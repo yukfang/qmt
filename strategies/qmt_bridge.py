@@ -10,7 +10,7 @@ QMT -> Web 桥接（只读）。不要回测。
 ACCOUNT = '220500068710'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
-BASE_URL = 'https://qmt.console.enrichlife.today'
+BASE_URL = 'https://qmt-console.enrichlife.today'
 TOKEN = ''  # 若服务器设了 BRIDGE_TOKEN，这里填同一个
 POLL_SEC = 3
 
@@ -46,6 +46,7 @@ def _http_json(path, payload=None, method='POST'):
             except Exception:
                 pass
         req.add_header('Content-Type', 'application/json')
+        req.add_header('User-Agent', 'QMT-Bridge/1.0')
         if TOKEN:
             req.add_header('X-Bridge-Token', TOKEN)
         resp = urlopen(req, timeout=8)
@@ -54,7 +55,29 @@ def _http_json(path, payload=None, method='POST'):
             content = content.decode('utf-8', 'replace')
         return resp.getcode(), content
     except Exception as e:
+        return _http_error(e)
+
+
+def _http_error(e):
+    code = getattr(e, 'code', None)
+    if code is None or not hasattr(e, 'read'):
         return -1, '%s %s' % (type(e).__name__, e)
+    try:
+        content = e.read()
+        if hasattr(content, 'decode'):
+            content = content.decode('utf-8', 'replace')
+    except Exception:
+        content = ''
+    headers = getattr(e, 'headers', None) or getattr(e, 'hdrs', None)
+    reason = ''
+    server = ''
+    if headers is not None:
+        try:
+            reason = headers.get('X-QMT-Reason') or ''
+            server = headers.get('Server') or ''
+        except Exception:
+            pass
+    return int(code), 'server=%s reason=%s body=%s' % (server, reason, str(content)[:400])
 
 
 def _public_attrs(obj):
@@ -392,6 +415,6 @@ def _sync_once(ContextInfo):
         code, content = _http_json('/api/sync', payload)
         _debug(ContextInfo, 'sync %s http %s orders=%s deals=%s open=%s bid1=%s ask1=%s body=%s' % (
             stock, code, len(order_views), len(deal_views), len(open_orders),
-            quote.get('bid1'), quote.get('ask1'), str(content)[:120]))
+            quote.get('bid1'), quote.get('ask1'), str(content)[:120 if code == 200 else 500]))
     ContextInfo.last_push = now
     _flush_debug(ContextInfo)

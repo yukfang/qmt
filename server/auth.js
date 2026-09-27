@@ -132,7 +132,14 @@ function currentUser(req) {
 function requireUser(req, res, next) {
   const user = currentUser(req);
   if (!user) {
-    res.status(401).json({ ok: false, error: "unauthorized" });
+    res.set("X-QMT-Reason", "LOGIN_REQUIRED");
+    res.status(401).json({
+      ok: false,
+      code: "LOGIN_REQUIRED",
+      error: "网页未登录或会话已过期，请重新登录",
+      method: req.method,
+      path: req.originalUrl.split("?")[0],
+    });
     return;
   }
   req.username = user;

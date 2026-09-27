@@ -16,7 +16,7 @@ TOKEN = ''
 ACCOUNT = '220500068710'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
-BASE_URL = 'https://qmt.console.enrichlife.today'
+BASE_URL = 'https://qmt-console.enrichlife.today'
 POLL_SEC = 2
 STRATEGY_NAME = 'qmt_hang_exec'
 
@@ -43,6 +43,7 @@ def _http_json(path, payload=None, method='GET'):
             from urllib2 import Request, urlopen
         url = BASE_URL.rstrip('/') + path
         req = Request(url, data=body)
+        req.add_header('User-Agent', 'QMT-Bridge/1.0')
         if method != 'POST' and body is None:
             try:
                 req.get_method = lambda: method
@@ -62,7 +63,29 @@ def _http_json(path, payload=None, method='GET'):
             content = content.decode('utf-8', 'replace')
         return resp.getcode(), content
     except Exception as e:
+        return _http_error(e)
+
+
+def _http_error(e):
+    code = getattr(e, 'code', None)
+    if code is None or not hasattr(e, 'read'):
         return -1, '%s %s' % (type(e).__name__, e)
+    try:
+        content = e.read()
+        if hasattr(content, 'decode'):
+            content = content.decode('utf-8', 'replace')
+    except Exception:
+        content = ''
+    headers = getattr(e, 'headers', None) or getattr(e, 'hdrs', None)
+    reason = ''
+    server = ''
+    if headers is not None:
+        try:
+            reason = headers.get('X-QMT-Reason') or ''
+            server = headers.get('Server') or ''
+        except Exception:
+            pass
+    return int(code), 'server=%s reason=%s body=%s' % (server, reason, str(content)[:400])
 
 
 def _parse_json(content):
@@ -201,7 +224,7 @@ def _fetch_commands():
     code, content = _http_json('/api/commands?limit=10', method='GET')
     data = _parse_json(content)
     if code != 200 or not data or not data.get('ok'):
-        return [], 'GET /api/commands http=%s body=%s' % (code, str(content)[:180])
+        return [], 'GET /api/commands http=%s body=%s' % (code, str(content)[:500])
     return data.get('commands') or [], None
 
 
@@ -209,7 +232,7 @@ def _claim(cmd_id):
     code, content = _http_json('/api/commands/%s/claim' % cmd_id, {}, method='POST')
     data = _parse_json(content)
     if code != 200 or not data or not data.get('ok'):
-        return None, 'claim http=%s body=%s' % (code, str(content)[:180])
+        return None, 'claim http=%s body=%s' % (code, str(content)[:500])
     return data.get('command'), None
 
 
