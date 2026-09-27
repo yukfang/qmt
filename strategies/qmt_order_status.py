@@ -7,6 +7,7 @@ QMT -> Web 桥接（只读）。不要回测。
 不下单、不撤单。
 """
 TOKEN = ''  # 若服务器设了 BRIDGE_TOKEN，这里填同一个
+STRATEGY_VERSION = 'status-v2'
 ACCOUNT = '220500068710'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
@@ -393,7 +394,7 @@ def init(ContextInfo):
             _debug(ContextInfo, 'set_account ok')
         except Exception as e:
             _debug(ContextInfo, 'set_account error: %s' % e, 'error')
-    _debug(ContextInfo, 'bridge init %s -> %s poll=%ss' % (','.join(STOCKS), BASE_URL, POLL_SEC))
+    _debug(ContextInfo, 'bridge init %s %s -> %s poll=%ss' % (STRATEGY_VERSION, ','.join(STOCKS), BASE_URL, POLL_SEC))
 
     if _try_start_run_time(ContextInfo):
         _sync_once(ContextInfo)

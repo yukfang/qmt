@@ -246,7 +246,8 @@ function readStrategy(id) {
   if (!file) return null;
   const code = require("fs").readFileSync(path.join(STRATEGY_DIR, file), "utf8");
   const sha256 = require("crypto").createHash("sha256").update(code, "utf8").digest("hex");
-  return { id, file, sha256, bytes: Buffer.byteLength(code, "utf8"), code };
+  const m = code.match(/^STRATEGY_VERSION\s*=\s*['"]([^'"]+)['"]/m);
+  return { id, file, version: m ? m[1] : "", sha256, bytes: Buffer.byteLength(code, "utf8"), code };
 }
 
 app.use("/api/strategies", (req, res, next) => {

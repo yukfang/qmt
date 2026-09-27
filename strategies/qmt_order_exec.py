@@ -13,6 +13,7 @@
   POST /api/commands/{id}/result
 """
 TOKEN = ''
+STRATEGY_VERSION = 'exec-v2'
 ACCOUNT = '220500068710'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
@@ -372,7 +373,7 @@ def init(ContextInfo):
             _debug(ContextInfo, 'set_account ok')
         except Exception as e:
             _debug(ContextInfo, 'set_account error: %s' % e, 'error')
-    _debug(ContextInfo, 'hang executor init %s -> %s poll=%ss' % (','.join(STOCKS), BASE_URL, POLL_SEC))
+    _debug(ContextInfo, 'hang executor init %s %s -> %s poll=%ss' % (STRATEGY_VERSION, ','.join(STOCKS), BASE_URL, POLL_SEC))
 
     if _try_start_run_time(ContextInfo):
         _run_once(ContextInfo)

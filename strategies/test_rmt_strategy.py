@@ -9,6 +9,7 @@ are looked up by name in this module, so the source must run in globals().
 
 OVERRIDES are written back after exec. Fill TOKEN here only; remote sources keep it empty.
 """
+LOADER_VERSION = 'rmt-v6'
 BASE_URL = 'https://qmt-console.enrichlife.today'
 STRATEGY_ID = 'order_status'
 OVERRIDES = {}
@@ -48,7 +49,7 @@ def _loader_http(path, payload=None):
 
 def _loader_log(message, level='info'):
     import time
-    print('[rmt] %s' % message)
+    print('[%s] %s' % (LOADER_VERSION, message))
     off = -time.timezone
     ts = '%s%s%02d:%02d' % (time.strftime('%Y-%m-%dT%H:%M:%S'), '+' if off >= 0 else '-',
                             abs(off) // 3600, (abs(off) % 3600) // 60)
@@ -57,7 +58,7 @@ def _loader_log(message, level='info'):
         'lines': [{'ts': ts, 'level': level, 'message': '%s: %s' % (STRATEGY_ID, message)}],
     })
     if code != 200:
-        print('[rmt] log upload failed http=%s %s' % (code, str(content)[:300]))
+        print('[%s] log upload failed http=%s %s' % (LOADER_VERSION, code, str(content)[:300]))
 
 
 def _loader_fetch(strategy_id):
@@ -82,63 +83,56 @@ def _loader_apply_overrides(g):
         g[key] = value
 
 
-def _loader_run(ContextInfo):
+def _loader_wrap(g, name):
+    fn = g.get(name)
+    if not callable(fn):
+        return
+    state = {'first': True}
+
+    def wrapped(ContextInfo, *args, **kwargs):
+        if state['first']:
+            state['first'] = False
+            _loader_log('%s called' % name)
+        try:
+            return fn(ContextInfo, *args, **kwargs)
+        except Exception:
+            import traceback
+            _loader_log('%s failed\n%s' % (name, traceback.format_exc()), 'error')
+            raise
+
+    wrapped.__name__ = name
+    g[name] = wrapped
+
+
+def _loader_boot():
     g = globals()
     loader = {
         'TOKEN': TOKEN, 'BASE_URL': BASE_URL, 'STRATEGY_ID': STRATEGY_ID, 'OVERRIDES': OVERRIDES,
     }
-    _loader_log('init enter base=%s token_len=%s globals_has_init=%s' % (BASE_URL, len(TOKEN), 'init' in g))
-    try:
-        source, meta = _loader_fetch(STRATEGY_ID)
-    except Exception as e:
-        _loader_log('load failed: %s %s' % (type(e).__name__, e), 'error')
-        return
-    _loader_log('downloaded %s bytes=%s sha256=%s' % (meta.get('file'), meta.get('bytes'), str(meta.get('sha256'))[:12]))
-    try:
-        exec(compile(source, 'remote:%s' % meta.get('file'), 'exec'), g)
-    except Exception:
-        import traceback
-        _loader_log('exec failed\n%s' % traceback.format_exc(), 'error')
-        return
+    _loader_log('boot base=%s token_len=%s' % (BASE_URL, len(TOKEN)))
+    source, meta = _loader_fetch(STRATEGY_ID)
+    _loader_log('downloaded %s version=%s bytes=%s sha256=%s' % (
+        meta.get('file'), meta.get('version') or '?', meta.get('bytes'), str(meta.get('sha256'))[:12]))
+    exec(compile(source, 'remote:%s' % meta.get('file'), 'exec'), g)
     g.update(loader)
     _loader_apply_overrides(g)
-    remote_init = g.get('init')
-    if remote_init is None or getattr(remote_init, 'rmt_loader', False):
-        _loader_log('remote strategy has no init()', 'error')
-        return
-    _loader_log('start init')
-    try:
-        remote_init(ContextInfo)
-    except Exception:
-        import traceback
-        _loader_log('remote init failed\n%s' % traceback.format_exc(), 'error')
-        return
-    _loader_log('remote init returned')
+    if not callable(g.get('init')):
+        raise RuntimeError('remote strategy has no init()')
+    _loader_wrap(g, 'init')
+    _loader_wrap(g, 'handlebar')
+    _loader_log('ready remote_version=%s, waiting for QMT to call init' % g.get('STRATEGY_VERSION', '?'))
 
 
 def init(ContextInfo):
-    print('[rmt] init called id=%s' % STRATEGY_ID)
-    try:
-        _loader_run(ContextInfo)
-    except BaseException:
-        import traceback
-        text = traceback.format_exc()
-        print('[rmt] loader crashed\n%s' % text)
-        try:
-            _loader_log('loader crashed\n%s' % text, 'error')
-        except BaseException:
-            pass
-
-
-init.rmt_loader = True
+    _loader_log('init called but remote strategy was not loaded', 'error')
 
 
 def handlebar(ContextInfo):
     return
 
 
-print('[rmt] module loaded id=%s token_len=%s' % (STRATEGY_ID, len(TOKEN)))
 try:
-    _loader_log('module loaded token_len=%s' % len(TOKEN))
-except BaseException as _e:
-    print('[rmt] module log failed %s %s' % (type(_e).__name__, _e))
+    _loader_boot()
+except BaseException:
+    import traceback
+    _loader_log('boot failed\n%s' % traceback.format_exc(), 'error')
