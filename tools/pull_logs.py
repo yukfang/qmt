@@ -16,7 +16,7 @@ LOG_DIR = ROOT / "logs"
 LOG_FILE = LOG_DIR / "qmt-debug.log"
 STATE_FILE = LOG_DIR / "pull-state.json"
 
-BASE_URL = os.environ.get("BRIDGE_URL", "https://ptrade.console.enrichlife.today").rstrip("/")
+BASE_URL = os.environ.get("BRIDGE_URL", "https://qmt-console.enrichlife.today").rstrip("/")
 TOKEN = os.environ.get("BRIDGE_TOKEN", "")
 
 
@@ -35,8 +35,9 @@ def save_after(after: int) -> None:
 
 
 def fetch(after: int) -> dict:
-    url = f"{BASE_URL}/api/debug?after={after}"
+    url = f"{BASE_URL}/api/logs?after={after}"
     req = urllib.request.Request(url)
+    req.add_header("User-Agent", "QMT-Bridge/1.0")
     if TOKEN:
         req.add_header("X-Bridge-Token", TOKEN)
     with urllib.request.urlopen(req, timeout=8) as resp:
@@ -45,7 +46,7 @@ def fetch(after: int) -> dict:
 
 def main() -> int:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"pulling {BASE_URL}/api/debug -> {LOG_FILE}", flush=True)
+    print(f"pulling {BASE_URL}/api/logs -> {LOG_FILE}", flush=True)
     after = load_after()
     while True:
         try:
@@ -55,9 +56,10 @@ def main() -> int:
                 with LOG_FILE.open("a", encoding="utf-8") as fh:
                     for item in items:
                         fh.write(
-                            f"{item.get('id')} {item.get('ts')} {item.get('level')} {item.get('message')}\n"
+                            f"{item.get('id')} {item.get('ts')} {item.get('level')} "
+                            f"[{item.get('source') or '-'} {item.get('runId') or '-'}] {item.get('message')}\n"
                         )
-                after = max(after, int(data.get("lastId") or items[-1]["id"]))
+                after = max(after, int(data.get("nextAfter") or items[-1]["id"]))
                 save_after(after)
                 print(f"wrote {len(items)} lines, after={after}", flush=True)
         except Exception as exc:

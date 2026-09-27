@@ -139,6 +139,10 @@ async function ensureSchema() {
       KEY idx_id (id)
     )
   `);
+  await ensureColumn("debug_log", "source", "VARCHAR(32) NOT NULL DEFAULT ''");
+  await ensureColumn("debug_log", "run_id", "VARCHAR(32) NOT NULL DEFAULT ''");
+  await ensureColumn("debug_log", "auth", "VARCHAR(16) NOT NULL DEFAULT ''");
+  await ensureIndex("debug_log", "idx_debug_source", "source, id");
   await db.query(`
     CREATE TABLE IF NOT EXISTS pending_orders (
       id BIGINT PRIMARY KEY AUTO_INCREMENT,
@@ -389,17 +393,29 @@ async function getSnapshot(since = 0, stock = "") {
   };
 }
 
-async function appendDebug(lines) {
+const DEBUG_LEVELS = new Set(["debug", "info", "warn", "error"]);
+
+function cleanDebugField(value, max) {
+  return String(value == null ? "" : value).trim().slice(0, max);
+}
+
+async function appendDebug(lines, { source = "", runId = "", auth = "" } = {}) {
   if (!lines.length) {
     return { accepted: 0, lastId: await maxDebugId() };
   }
   const db = getPool();
-  const values = lines.map((line) => [
-    line.ts || new Date().toISOString(),
-    line.level || "info",
-    String(line.message == null ? "" : line.message),
-  ]);
-  await db.query(`INSERT INTO debug_log (ts, level, message) VALUES ?`, [values]);
+  const values = lines.map((line) => {
+    const level = cleanDebugField(line.level, 16).toLowerCase();
+    return [
+      cleanDebugField(line.ts, 40) || new Date().toISOString(),
+      DEBUG_LEVELS.has(level) ? level : "info",
+      String(line.message == null ? "" : line.message).slice(0, 8000),
+      cleanDebugField(line.source || source, 32),
+      cleanDebugField(line.runId || runId, 32),
+      cleanDebugField(auth, 16),
+    ];
+  });
+  await db.query(`INSERT INTO debug_log (ts, level, message, source, run_id, auth) VALUES ?`, [values]);
   return { accepted: lines.length, lastId: await maxDebugId() };
 }
 
@@ -409,19 +425,41 @@ async function maxDebugId() {
   return Number(rows[0] && rows[0].lastId) || 0;
 }
 
-async function getDebug({ after = 0, tail = 0 } = {}) {
+async function getDebug({ after = 0, tail = 0, source = "", level = "", runId = "", q = "", sinceMinutes = 0, limit = 500 } = {}) {
   const db = getPool();
   const lastId = await maxDebugId();
-  let sql = `SELECT id, ts, level, message FROM debug_log WHERE id > ? ORDER BY id ASC`;
-  const params = [after];
-  if (tail > 0) {
-    sql = `SELECT id, ts, level, message FROM (
-             SELECT id, ts, level, message FROM debug_log WHERE id > ? ORDER BY id DESC LIMIT ?
-           ) t ORDER BY id ASC`;
-    params.push(tail);
+  const where = ["id > ?"];
+  const params = [Math.max(0, Number(after) || 0)];
+  if (source) {
+    where.push("source = ?");
+    params.push(String(source).slice(0, 32));
   }
+  if (level === "error") {
+    where.push("level = 'error'");
+  } else if (level === "warn") {
+    where.push("level IN ('warn', 'error')");
+  }
+  if (runId) {
+    where.push("run_id = ?");
+    params.push(String(runId).slice(0, 32));
+  }
+  if (q) {
+    where.push("message LIKE ?");
+    params.push(`%${String(q).slice(0, 200)}%`);
+  }
+  if (Number(sinceMinutes) > 0) {
+    where.push("created_at >= NOW(3) - INTERVAL ? MINUTE");
+    params.push(Math.min(Number(sinceMinutes), 60 * 24 * 30));
+  }
+  const cols = "id, ts, level, source, run_id AS runId, auth, message, created_at AS createdAt";
+  const cap = Math.max(1, Math.min(2000, Number(tail) > 0 ? Number(tail) : Number(limit) || 500));
+  const sql = Number(tail) > 0
+    ? `SELECT * FROM (SELECT ${cols} FROM debug_log WHERE ${where.join(" AND ")} ORDER BY id DESC LIMIT ?) t ORDER BY id ASC`
+    : `SELECT ${cols} FROM debug_log WHERE ${where.join(" AND ")} ORDER BY id ASC LIMIT ?`;
+  params.push(cap);
   const [rows] = await db.query(sql, params);
-  return { lastId, items: rows };
+  const nextAfter = rows.length ? Number(rows[rows.length - 1].id) : Math.max(0, Number(after) || 0);
+  return { lastId, nextAfter, items: rows };
 }
 
 async function health() {

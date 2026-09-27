@@ -294,30 +294,68 @@ def _read_quotes(ContextInfo):
     return out, None
 
 
+LOG_SOURCE = 'status'
+LOG_KEEP = 2000
+LOG_BATCH = 500
+LOG_BEAT_SEC = 60
+_LOG_BUF = []
+_LOG_STATE = {'run_id': '', 'dropped': 0, 'beat': 0}
+
+
+def _log_ts():
+    import time
+    t = time.time()
+    off = -time.altzone if time.localtime(t).tm_isdst > 0 else -time.timezone
+    sign = '+' if off >= 0 else '-'
+    off = abs(off)
+    return '%s.%03d%s%02d:%02d' % (
+        time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(t)), int((t % 1) * 1000),
+        sign, off // 3600, (off % 3600) // 60)
+
+
+def _new_run_id():
+    import random
+    import time
+    _LOG_STATE['run_id'] = '%s-%04x' % (time.strftime('%m%d%H%M%S'), random.randint(0, 0xffff))
+    return _LOG_STATE['run_id']
+
+
 def _debug(ContextInfo, message, level='info'):
     print(message)
-    lines = getattr(ContextInfo, 'dbg_lines', None)
-    if lines is None:
-        ContextInfo.dbg_lines = []
-        lines = ContextInfo.dbg_lines
-    lines.append({'level': level, 'message': str(message)})
+    _LOG_BUF.append({'ts': _log_ts(), 'level': level, 'message': str(message)})
+    if len(_LOG_BUF) > LOG_KEEP:
+        extra = len(_LOG_BUF) - LOG_KEEP
+        del _LOG_BUF[:extra]
+        _LOG_STATE['dropped'] += extra
+
+
+def _log_exc(ContextInfo, where):
+    import traceback
+    _debug(ContextInfo, '%s exception\n%s' % (where, traceback.format_exc()), 'error')
 
 
 def _flush_debug(ContextInfo):
-    lines = getattr(ContextInfo, 'dbg_lines', None)
-    if not lines:
-        return
-    code, content = _http_json('/api/debug', {'lines': lines})
-    print('debug http', code, str(content)[:200])
-    ContextInfo.dbg_lines = []
+    while _LOG_BUF:
+        if _LOG_STATE['dropped']:
+            _LOG_BUF.insert(0, {'ts': _log_ts(), 'level': 'warn',
+                                'message': 'log buffer overflow, dropped %s lines' % _LOG_STATE['dropped']})
+            _LOG_STATE['dropped'] = 0
+        batch = _LOG_BUF[:LOG_BATCH]
+        code, content = _http_json('/api/logs', {
+            'source': LOG_SOURCE, 'runId': _LOG_STATE['run_id'], 'lines': batch})
+        if code != 200:
+            print('log upload failed http=%s keep=%s %s' % (code, len(_LOG_BUF), str(content)[:300]))
+            return
+        del _LOG_BUF[:len(batch)]
 
 
 def bridge_poll(ContextInfo):
     """给 ContextInfo.run_time 用的全局回调名。"""
     try:
         _sync_once(ContextInfo)
-    except Exception as e:
-        print('bridge_poll error:', type(e).__name__, e)
+    except Exception:
+        _log_exc(ContextInfo, 'bridge_poll')
+        _flush_debug(ContextInfo)
 
 
 def _try_start_run_time(ContextInfo):
@@ -338,16 +376,17 @@ def _poll_loop(ContextInfo):
     while not getattr(ContextInfo, 'stop_poll', False):
         try:
             _sync_once(ContextInfo)
-        except Exception as e:
-            print('poll error:', type(e).__name__, e)
+        except Exception:
+            _log_exc(ContextInfo, 'poll_loop')
+            _flush_debug(ContextInfo)
         time.sleep(POLL_SEC)
 
 
 def init(ContextInfo):
     ContextInfo.last_push = 0
     ContextInfo.last_hash = ''
-    ContextInfo.dbg_lines = []
     ContextInfo.stop_poll = False
+    _new_run_id()
     ContextInfo.set_universe(STOCKS)
     if ACCOUNT and hasattr(ContextInfo, 'set_account'):
         try:
@@ -396,6 +435,9 @@ def _sync_once(ContextInfo):
         _debug(ContextInfo, quote_err, 'error')
         quotes = {}
 
+    beat = now - _LOG_STATE['beat'] >= LOG_BEAT_SEC
+    if beat:
+        _LOG_STATE['beat'] = now
     for stock in STOCKS:
         # 每只股票单独 POST /api/sync，互不混在一个 payload 里
         stock_orders = _filter_stock(orders, stock)
@@ -413,8 +455,11 @@ def _sync_once(ContextInfo):
         }
         payload.update(quote)
         code, content = _http_json('/api/sync', payload)
-        _debug(ContextInfo, 'sync %s http %s orders=%s deals=%s open=%s bid1=%s ask1=%s body=%s' % (
-            stock, code, len(order_views), len(deal_views), len(open_orders),
-            quote.get('bid1'), quote.get('ask1'), str(content)[:120 if code == 200 else 500]))
+        changed = code == 200 and '"unchanged":false' in str(content).replace(' ', '')
+        if code != 200 or changed or beat:
+            _debug(ContextInfo, 'sync %s http %s orders=%s deals=%s open=%s bid1=%s ask1=%s body=%s' % (
+                stock, code, len(order_views), len(deal_views), len(open_orders),
+                quote.get('bid1'), quote.get('ask1'), str(content)[:120 if code == 200 else 500]),
+                'info' if code == 200 else 'error')
     ContextInfo.last_push = now
     _flush_debug(ContextInfo)

@@ -96,22 +96,58 @@ def _parse_json(content):
         return None
 
 
+LOG_SOURCE = 'exec'
+LOG_KEEP = 2000
+LOG_BATCH = 500
+_LOG_BUF = []
+_LOG_STATE = {'run_id': '', 'dropped': 0, 'beat': 0}
+
+
+def _log_ts():
+    import time
+    t = time.time()
+    off = -time.altzone if time.localtime(t).tm_isdst > 0 else -time.timezone
+    sign = '+' if off >= 0 else '-'
+    off = abs(off)
+    return '%s.%03d%s%02d:%02d' % (
+        time.strftime('%Y-%m-%dT%H:%M:%S', time.localtime(t)), int((t % 1) * 1000),
+        sign, off // 3600, (off % 3600) // 60)
+
+
+def _new_run_id():
+    import random
+    import time
+    _LOG_STATE['run_id'] = '%s-%04x' % (time.strftime('%m%d%H%M%S'), random.randint(0, 0xffff))
+    return _LOG_STATE['run_id']
+
+
 def _debug(ContextInfo, message, level='info'):
     print(message)
-    lines = getattr(ContextInfo, 'dbg_lines', None)
-    if lines is None:
-        ContextInfo.dbg_lines = []
-        lines = ContextInfo.dbg_lines
-    lines.append({'level': level, 'message': str(message)})
+    _LOG_BUF.append({'ts': _log_ts(), 'level': level, 'message': str(message)})
+    if len(_LOG_BUF) > LOG_KEEP:
+        extra = len(_LOG_BUF) - LOG_KEEP
+        del _LOG_BUF[:extra]
+        _LOG_STATE['dropped'] += extra
+
+
+def _log_exc(ContextInfo, where):
+    import traceback
+    _debug(ContextInfo, '%s exception\n%s' % (where, traceback.format_exc()), 'error')
 
 
 def _flush_debug(ContextInfo):
-    lines = getattr(ContextInfo, 'dbg_lines', None)
-    if not lines:
-        return
-    code, content = _http_json('/api/debug', {'lines': lines}, method='POST')
-    print('debug http', code, str(content)[:160])
-    ContextInfo.dbg_lines = []
+    while _LOG_BUF:
+        if _LOG_STATE['dropped']:
+            _LOG_BUF.insert(0, {'ts': _log_ts(), 'level': 'warn',
+                                'message': 'log buffer overflow, dropped %s lines' % _LOG_STATE['dropped']})
+            _LOG_STATE['dropped'] = 0
+        batch = _LOG_BUF[:LOG_BATCH]
+        code, content = _http_json('/api/logs', {
+            'source': LOG_SOURCE, 'runId': _LOG_STATE['run_id'], 'lines': batch}, method='POST')
+        if code != 200:
+            print('log upload failed http=%s keep=%s %s' % (code, len(_LOG_BUF), str(content)[:300]))
+            return
+        del _LOG_BUF[:len(batch)]
 
 
 def _resolve_fn(ContextInfo, names):
@@ -245,8 +281,9 @@ def _result(cmd_id, ok, broker_order_id='', error=''):
 def hang_poll(ContextInfo):
     try:
         _run_once(ContextInfo)
-    except Exception as e:
-        print('hang_poll error:', type(e).__name__, e)
+    except Exception:
+        _log_exc(ContextInfo, 'hang_poll')
+        _flush_debug(ContextInfo)
 
 
 def _try_start_run_time(ContextInfo):
@@ -267,8 +304,9 @@ def _poll_loop(ContextInfo):
     while not getattr(ContextInfo, 'stop_poll', False):
         try:
             _run_once(ContextInfo)
-        except Exception as e:
-            print('poll error:', type(e).__name__, e)
+        except Exception:
+            _log_exc(ContextInfo, 'poll_loop')
+            _flush_debug(ContextInfo)
         time.sleep(POLL_SEC)
 
 
@@ -284,6 +322,11 @@ def _run_once(ContextInfo):
         _flush_debug(ContextInfo)
         return
     if not cmds:
+        now = _now()
+        if now - _LOG_STATE['beat'] >= 60:
+            _LOG_STATE['beat'] = now
+            _debug(ContextInfo, 'idle: no pending commands')
+            _flush_debug(ContextInfo)
         return
 
     for cmd in cmds:
@@ -320,8 +363,8 @@ def _run_once(ContextInfo):
 
 
 def init(ContextInfo):
-    ContextInfo.dbg_lines = []
     ContextInfo.stop_poll = False
+    _new_run_id()
     ContextInfo.set_universe(STOCKS)
     if ACCOUNT and hasattr(ContextInfo, 'set_account'):
         try:

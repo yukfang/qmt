@@ -46,13 +46,22 @@ npm start
 
 Local 和 Cloud 用**同一套** `QMT_DATABASE_URL`。SSL 使用 `assets/ApsaraDB-CA-Chain/ApsaraDB-CA-Chain.pem`（`?ssl=true`）。
 
-### 拉 debug 日志（给 Cursor 读）
+### 看策略日志（给 Cursor 读）
+
+两个 QMT 策略把日志写到 `POST /api/logs`（`source` 为 `status` 或 `exec`，每次启动有一个 `runId`）。异常带完整 traceback；上传失败的行留在内存里，下次补传。
+
+直接读数据库，不需要 token：
 
 ```bash
-python3 tools/pull_logs.py
+node tools/logs.js                  # 最近 50 行
+node tools/logs.js -s exec -n 200   # 执行器
+node tools/logs.js -l error --since 60
+node tools/logs.js -q claim -f      # 关键字 + 持续跟踪
 ```
 
-默认拉线上 `https://qmt.console.enrichlife.today`，写入 `logs/qmt-debug.log`。
+走 HTTP（需要 `X-Bridge-Token` 或网页登录）：`GET /api/logs?tail=100&source=exec&level=error&q=claim&since=60&format=text`
+
+`python3 tools/pull_logs.py` 持续拉 `/api/logs` 写到 `logs/qmt-debug.log`。
 
 ### QMT 侧
 
@@ -78,7 +87,8 @@ python3 tools/pull_logs.py
 - `strategies/qmt_hang_executor.py`：拉取 pending 挂单并实盘 `passorder`
 - `server/`：Express；写入/读取 MySQL
 - `server/schema.sql`：表结构
-- `tools/pull_logs.py`：每秒拉 `/api/debug` 到本地（可选，库通了之后可直接查 `debug_log`）
+- `tools/logs.js`：直接查 `debug_log` 看策略日志
+- `tools/pull_logs.py`：每秒拉 `/api/logs` 到本地
 
 ## API
 

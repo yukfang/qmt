@@ -177,29 +177,66 @@ app.get(
   })
 );
 
-app.post(
-  "/api/debug",
-  checkToken,
-  asyncHandler(async (req, res) => {
-    const body = req.body || {};
-    const lines = Array.isArray(body.lines)
-      ? body.lines
-      : [{ level: body.level || "info", message: body.message || JSON.stringify(body) }];
-    const result = await db.appendDebug(lines);
-    res.json({ ok: true, ...result });
-  })
-);
+const LOG_BATCH_MAX = 500;
 
-app.get(
-  "/api/debug",
-  checkToken,
-  asyncHandler(async (req, res) => {
-    const after = Number(req.query.after || 0);
-    const tail = Number(req.query.tail || 0);
-    const result = await db.getDebug({ after, tail });
-    res.json({ ok: true, ...result });
-  })
-);
+function tokenState(req) {
+  if (!TOKEN) return "open";
+  const { got } = bridgeToken(req);
+  if (!got) return "missing";
+  return got === TOKEN ? "ok" : "mismatch";
+}
+
+// Accepts writes without a valid token so auth problems themselves can be logged; each row records `auth`.
+const writeLogs = asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const lines = Array.isArray(body.lines)
+    ? body.lines
+    : [{ level: body.level || "info", message: body.message == null ? JSON.stringify(body) : body.message }];
+  if (lines.length > LOG_BATCH_MAX) {
+    sendFail(req, res, 413, "LOG_BATCH_TOO_LARGE", `一次最多 ${LOG_BATCH_MAX} 行，本次 ${lines.length} 行`);
+    return;
+  }
+  const auth = tokenState(req);
+  const result = await db.appendDebug(lines, {
+    source: body.source || req.get("x-qmt-source") || "",
+    runId: body.runId || "",
+    auth,
+  });
+  res.json({ ok: true, auth, ...result });
+});
+
+function formatLogLine(item) {
+  const ts = String(item.ts || item.createdAt || "");
+  const tag = [item.source || "-", item.runId || "-", item.auth && item.auth !== "ok" ? `auth=${item.auth}` : ""]
+    .filter(Boolean)
+    .join(" ");
+  return `${item.id} ${ts} ${String(item.level || "info").toUpperCase()} [${tag}] ${item.message}`;
+}
+
+const readLogs = asyncHandler(async (req, res) => {
+  const q = req.query;
+  const result = await db.getDebug({
+    after: q.after,
+    tail: q.tail,
+    source: q.source,
+    level: String(q.level || "").toLowerCase(),
+    runId: q.run || q.runId,
+    q: q.q,
+    sinceMinutes: q.since,
+    limit: q.limit,
+  });
+  if (String(q.format || "").toLowerCase() === "text") {
+    res.type("text/plain; charset=utf-8");
+    res.set("X-Log-Last-Id", String(result.lastId));
+    res.set("X-Log-Next-After", String(result.nextAfter));
+    res.send(result.items.map(formatLogLine).join("\n") + (result.items.length ? "\n" : ""));
+    return;
+  }
+  res.json({ ok: true, ...result });
+});
+
+app.post(["/api/logs", "/api/debug"], writeLogs);
+app.get(["/api/logs", "/api/debug"], allowBridgeOrConsole, readLogs);
 
 app.get(
   "/api/commands",
