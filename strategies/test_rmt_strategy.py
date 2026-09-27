@@ -1,14 +1,14 @@
 #coding:gbk
+TOKEN = ''  # same value as server BRIDGE_TOKEN
 """
-远程策略加载器。实盘启动，不要回测。
+Remote strategy loader. Run live, not backtest. Keep this file ASCII-only.
 
-init 时按 STRATEGY_ID 从 GET /api/strategies/{id} 下载源码，在本文件的全局空间里执行，
-再调用下载策略的 init。下载策略里用 ContextInfo.run_time 注册的回调（如 bridge_poll）
-按函数名在本模块里查找，所以源码必须执行在 globals() 里。
+init downloads GET /api/strategies/{STRATEGY_ID} and execs it in this module's globals(),
+then calls the downloaded init. Callbacks registered with ContextInfo.run_time (e.g. bridge_poll)
+are looked up by name in this module, so the source must run in globals().
 
-OVERRIDES 在源码执行后写回全局变量，TOKEN 等只在这里填，远程源码里保持为空。
+OVERRIDES are written back after exec. Fill TOKEN here only; remote sources keep it empty.
 """
-TOKEN = ''  # 与服务器 BRIDGE_TOKEN 相同
 BASE_URL = 'https://qmt-console.enrichlife.today'
 STRATEGY_ID = 'order_status'
 OVERRIDES = {}
@@ -49,11 +49,15 @@ def _loader_http(path, payload=None):
 def _loader_log(message, level='info'):
     import time
     print('[rmt] %s' % message)
-    _loader_http('/api/logs', {
+    off = -time.timezone
+    ts = '%s%s%02d:%02d' % (time.strftime('%Y-%m-%dT%H:%M:%S'), '+' if off >= 0 else '-',
+                            abs(off) // 3600, (abs(off) % 3600) // 60)
+    code, content = _loader_http('/api/logs', {
         'source': LOADER_SOURCE,
-        'lines': [{'ts': time.strftime('%Y-%m-%dT%H:%M:%S'), 'level': level,
-                   'message': '%s: %s' % (STRATEGY_ID, message)}],
+        'lines': [{'ts': ts, 'level': level, 'message': '%s: %s' % (STRATEGY_ID, message)}],
     })
+    if code != 200:
+        print('[rmt] log upload failed http=%s %s' % (code, str(content)[:300]))
 
 
 def _loader_fetch(strategy_id):
@@ -78,12 +82,12 @@ def _loader_apply_overrides(g):
         g[key] = value
 
 
-def init(ContextInfo):
+def _loader_run(ContextInfo):
     g = globals()
-    loader_init = g['init']
     loader = {
         'TOKEN': TOKEN, 'BASE_URL': BASE_URL, 'STRATEGY_ID': STRATEGY_ID, 'OVERRIDES': OVERRIDES,
     }
+    _loader_log('init enter base=%s token_len=%s globals_has_init=%s' % (BASE_URL, len(TOKEN), 'init' in g))
     try:
         source, meta = _loader_fetch(STRATEGY_ID)
     except Exception as e:
@@ -99,7 +103,7 @@ def init(ContextInfo):
     g.update(loader)
     _loader_apply_overrides(g)
     remote_init = g.get('init')
-    if remote_init is None or remote_init is loader_init:
+    if remote_init is None or getattr(remote_init, 'rmt_loader', False):
         _loader_log('remote strategy has no init()', 'error')
         return
     _loader_log('start init')
@@ -108,7 +112,33 @@ def init(ContextInfo):
     except Exception:
         import traceback
         _loader_log('remote init failed\n%s' % traceback.format_exc(), 'error')
+        return
+    _loader_log('remote init returned')
+
+
+def init(ContextInfo):
+    print('[rmt] init called id=%s' % STRATEGY_ID)
+    try:
+        _loader_run(ContextInfo)
+    except BaseException:
+        import traceback
+        text = traceback.format_exc()
+        print('[rmt] loader crashed\n%s' % text)
+        try:
+            _loader_log('loader crashed\n%s' % text, 'error')
+        except BaseException:
+            pass
+
+
+init.rmt_loader = True
 
 
 def handlebar(ContextInfo):
     return
+
+
+print('[rmt] module loaded id=%s token_len=%s' % (STRATEGY_ID, len(TOKEN)))
+try:
+    _loader_log('module loaded token_len=%s' % len(TOKEN))
+except BaseException as _e:
+    print('[rmt] module log failed %s %s' % (type(_e).__name__, _e))

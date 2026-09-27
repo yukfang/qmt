@@ -249,6 +249,24 @@ function readStrategy(id) {
   return { id, file, sha256, bytes: Buffer.byteLength(code, "utf8"), code };
 }
 
+app.use("/api/strategies", (req, res, next) => {
+  const started = Date.now();
+  const tokenAtStart = tokenState(req);
+  res.on("finish", () => {
+    const ua = String(req.get("user-agent") || "").slice(0, 80);
+    const ip = String(req.get("cf-connecting-ip") || req.get("x-forwarded-for") || req.ip || "").split(",")[0].trim();
+    const reason = res.get("X-QMT-Reason") || "";
+    db.appendDebug(
+      [{
+        level: res.statusCode < 400 ? "info" : "error",
+        message: `download ${req.method} ${req.originalUrl.split("?")[0]} -> ${res.statusCode}${reason ? ` ${reason}` : ""} token=${tokenAtStart} ip=${ip} ua=${ua} ${Date.now() - started}ms`,
+      }],
+      { source: "server", auth: tokenAtStart }
+    ).catch((err) => console.error("strategy access log failed:", err.message));
+  });
+  next();
+});
+
 app.get(
   "/api/strategies",
   checkToken,
