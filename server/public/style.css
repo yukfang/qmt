@@ -566,13 +566,11 @@ body.cruise-on .cruise-btn {
 
 body.cruise-on .ladder-section,
 body.cruise-on .qty-control,
-body.cruise-on .cancel-all-btn,
-body.cruise-on .stock-switch {
+body.cruise-on .cancel-all-btn {
   pointer-events: none;
 }
 
-body.cruise-on .cancel-all-btn,
-body.cruise-on .stock-switch {
+body.cruise-on .cancel-all-btn {
   opacity: 0.45;
 }
 
@@ -582,8 +580,7 @@ body.cruise-on .ladder-section {
 
 html[data-sim="1"] body.cruise-on .ladder-section,
 html[data-sim="1"] body.cruise-on .qty-control,
-html[data-sim="1"] body.cruise-on .cancel-all-btn,
-html[data-sim="1"] body.cruise-on .stock-switch {
+html[data-sim="1"] body.cruise-on .cancel-all-btn {
   pointer-events: auto;
   opacity: 1;
 }

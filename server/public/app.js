@@ -1898,23 +1898,27 @@ function releaseCruiseLease(stock) {
   }).catch(() => {});
 }
 
-async function postCruiseState(on) {
+async function postCruiseState(on, stock) {
+  const id = normalizeStockId(stock || selectedStock());
   const res = await fetch("/api/cruise", {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cruiseBody({ on })),
+    body: JSON.stringify(cruiseBody({ on }, id)),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  applyCruiseFromServer(data, selectedStock());
+  applyCruiseFromServer(data, id);
 }
 
 async function setCruise(on) {
-  const book = cruiseBook(selectedStock());
+  // The user may switch stocks while fills are in flight; pin everything to the stock clicked.
+  const stock = selectedStock();
+  const data = getLastGoodData();
+  const book = cruiseBook(stock);
   if (book.busy) return;
   if (on) {
-    const reason = cruiseEnableError(getLastGoodData());
+    const reason = cruiseEnableError(data);
     if (reason) {
       pushAlert(reason);
       window.alert(reason);
@@ -1924,31 +1928,31 @@ async function setCruise(on) {
   book.busy = true;
   try {
     if (on) {
-      const plans = cruiseFillPlans(getLastGoodData());
+      const plans = cruiseFillPlans(data);
       for (const plan of plans) {
         const label = plan.side === "sell" ? "卖挂" : "买挂";
         try {
-          const lease = await renewCruiseLease(selectedStock());
+          const lease = await renewCruiseLease(stock);
           if (!lease.held && lease.reason === "busy") break;
           const order = await postHangOrder({
             ...plan,
-            stock: getLastGoodData().stock,
-            account: getLastGoodData().account,
+            stock: data.stock || stock,
+            account: data.account,
             source: "cruise",
           });
           if (order && order.covered) continue;
-          rememberPendingHang(order, { ...plan, source: "cruise" });
+          rememberPendingHang(order, { ...plan, stock: data.stock || stock, source: "cruise" });
         } catch (err) {
-          const reason = `巡航补单失败：${label} ${plan.price.toFixed(3)} × ${plan.qty}：${err.message}`;
+          const reason = `${stockProfile(stock).label} 巡航补单失败：${label} ${plan.price.toFixed(3)} × ${plan.qty}：${err.message}`;
           pushAlert(reason);
           window.alert(reason);
           return;
         }
       }
     }
-    await postCruiseState(on);
-    if (on) await renewCruiseLease(selectedStock());
-    else releaseCruiseLease(selectedStock());
+    await postCruiseState(on, stock);
+    if (on) await renewCruiseLease(stock);
+    else releaseCruiseLease(stock);
   } catch (err) {
     const reason = `巡航同步失败：${err.message}`;
     pushAlert(reason);
@@ -2585,7 +2589,6 @@ function paintStateMeta(data, stock) {
 }
 
 async function switchStock(id) {
-  if (cruiseOn && !isSimMode()) return;
   const next = normalizeStockId(id);
   if (next === selectedStock()) return;
   const epoch = ++viewEpoch;
