@@ -1,6 +1,6 @@
 {
   "name": "qmt-bridge",
-  "version": "0.9.40",
+  "version": "0.9.41",
   "private": true,
   "description": "QMT account bridge: receive orders/deals from Galaxy QMT and show a web UI",
   "main": "server/index.js",
