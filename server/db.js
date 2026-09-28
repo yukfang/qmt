@@ -186,6 +186,7 @@ async function ensureSchema() {
   await ensureColumn("user_cruise", "rungs_json", "TEXT NULL");
   await ensureColumn("user_cruise", "lease_holder", "VARCHAR(64) NULL");
   await ensureColumn("user_cruise", "lease_until", "DATETIME(3) NULL");
+  await ensureColumn("user_cruise", "hang_qty", "INT NULL");
   await ensureCruiseChannelWidth();
 }
 
@@ -851,7 +852,7 @@ async function getCruiseState(username, channel, stock) {
   const ch = cruiseChannel(channel, stock);
   const db = getPool();
   let [rows] = await db.query(
-    `SELECT cruise_on, rungs_json FROM user_cruise WHERE username = ? AND channel = ?`,
+    `SELECT cruise_on, rungs_json, hang_qty FROM user_cruise WHERE username = ? AND channel = ?`,
     [username, ch]
   );
   if (!rows.length && ch.endsWith(":159781.SZ")) {
@@ -878,6 +879,7 @@ async function getCruiseState(username, channel, stock) {
   return {
     on: Boolean(rows[0] && rows[0].cruise_on),
     channel: ch,
+    qty: Number(rows[0] && rows[0].hang_qty) || 0,
     rungs: book.rungs,
     dropped: book.dropped,
     lastDeal: book.lastDeal,
@@ -887,14 +889,15 @@ async function getCruiseState(username, channel, stock) {
   };
 }
 
-async function setCruiseState(username, channel, on, stock) {
+async function setCruiseState(username, channel, on, stock, qty = 0) {
   const ch = cruiseChannel(channel, stock);
   const db = getPool();
+  const hangQty = Math.round(Number(qty) || 0) > 0 ? Math.round(Number(qty)) : null;
   await db.query(
-    `INSERT INTO user_cruise (username, channel, cruise_on)
-     VALUES (?, ?, ?)
-     ON DUPLICATE KEY UPDATE cruise_on = VALUES(cruise_on)`,
-    [username, ch, on ? 1 : 0]
+    `INSERT INTO user_cruise (username, channel, cruise_on, hang_qty)
+     VALUES (?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE cruise_on = VALUES(cruise_on), hang_qty = COALESCE(VALUES(hang_qty), hang_qty)`,
+    [username, ch, on ? 1 : 0, hangQty]
   );
   if (!on) {
     await db.query(
@@ -944,6 +947,35 @@ async function saveCruiseRungs(username, channel, stock, rungs, dropped, lastDea
     [username, ch, JSON.stringify(book)]
   );
   return getCruiseState(username, channel, stock);
+}
+
+async function listActiveCruises() {
+  const db = getPool();
+  const [rows] = await db.query(
+    `SELECT username, channel, hang_qty FROM user_cruise WHERE cruise_on = 1 AND channel LIKE 'live:%'`
+  );
+  return rows.map((row) => ({
+    username: row.username,
+    stock: String(row.channel).split(":")[1] || "",
+    qty: Number(row.hang_qty) || 0,
+  }));
+}
+
+// Written only while cruise is on, so a tick finishing after the user turned cruise off
+// cannot resurrect rungs that setCruiseState(off) just cleared.
+async function saveCruiseBookIfOn(username, stock, book) {
+  const ch = cruiseChannel("live", stock);
+  const db = getPool();
+  const [result] = await db.query(
+    `UPDATE user_cruise SET rungs_json = ? WHERE username = ? AND channel = ? AND cruise_on = 1`,
+    [JSON.stringify({
+      rungs: Array.isArray(book.rungs) ? book.rungs : [],
+      dropped: [...(book.dropped || [])].map(String),
+      lastDeal: book.lastDeal || null,
+      prevDeal: book.prevDeal || null,
+    }), username, ch]
+  );
+  return Boolean(result.affectedRows);
 }
 
 async function renewCruiseLease(username, channel, stock, holder) {
@@ -1031,6 +1063,9 @@ module.exports = {
   getCruiseState,
   setCruiseState,
   saveCruiseRungs,
+  listActiveCruises,
+  saveCruiseBookIfOn,
+  normalizeStockCode,
   renewCruiseLease,
   releaseCruiseLease,
   claimCruiseSeen,

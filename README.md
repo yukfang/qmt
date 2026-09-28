@@ -63,6 +63,17 @@ node tools/logs.js -q claim -f      # 关键字 + 持续跟踪
 
 `python3 tools/pull_logs.py` 持续拉 `/api/logs` 写到 `logs/qmt-debug.log`。
 
+### 巡航（服务器端执行）
+
+巡航由 `server/cruise.js` 在服务器进程里每 3 秒执行一次，网页只负责开关和展示；开启后可以关掉网页。
+
+- 开启：网页把开关和当前「默认数量」发给 `POST /api/cruise`，服务器校验（有卖挂、价差够、没有待执行挂单）、补齐两侧挂单后才打开开关，失败原因直接返回
+- 执行：成交反挂（目标价被行情越过时按买一/卖一挂，并记警告）、补足买挂、跨天续航、按昨日成交续航、跳空补档；每只股票各自一把数据库租约，多实例也只有一个在执行
+- 日志：`node tools/logs.js -s cruise`；警告和错误会在打开的网页上弹出
+- 引擎只在 Azure（有 `WEBSITE_SITE_NAME`）默认启动；本地服务默认关闭，需要时设 `CRUISE_ENGINE=on`
+- **Azure 必须打开 Always On**（配置 → 常规设置 → 始终打开），否则应用空闲休眠后巡航会停
+- 逻辑测试：`node tools/test_cruise_engine.js`（内存假数据库，不连 MySQL）
+
 ### 远程策略（QMT 只放一个加载器）
 
 `strategies/test_rmt_strategy.py` 顶部只改参数：`TOKEN`、`STRATEGY_ID`、`PARAMS`（覆盖远程策略里的全局变量）。挂在行情图上运行（日志出现 `[quote]start simulation mode`）。

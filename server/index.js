@@ -5,6 +5,13 @@ const pkg = require("../package.json");
 const express = require("express");
 const db = require("./db");
 const auth = require("./auth");
+const cruise = require("./cruise");
+
+// Default on only in Azure App Service, so a local server pointed at the production database
+// never places real cruise orders unless explicitly asked to.
+const cruiseEngineOn = process.env.CRUISE_ENGINE
+  ? process.env.CRUISE_ENGINE.toLowerCase() === "on"
+  : Boolean(process.env.WEBSITE_SITE_NAME);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -478,7 +485,7 @@ app.get(
   auth.requireUser,
   asyncHandler(async (req, res) => {
     const state = await db.getCruiseState(req.username, req.query.channel, req.query.stock);
-    res.json({ ok: true, ...state });
+    res.json({ ok: true, engine: cruiseEngineOn, ...state });
   })
 );
 
@@ -487,67 +494,29 @@ app.post(
   auth.requireUser,
   asyncHandler(async (req, res) => {
     const body = req.body || {};
-    const state = await db.setCruiseState(req.username, body.channel, Boolean(body.on), body.stock);
-    res.json({ ok: true, ...state });
+    if (String(body.channel || "live").toLowerCase().startsWith("sim")) {
+      sendFail(req, res, 400, "CRUISE_SIM_REMOVED", "模拟巡航已移除，巡航只在实盘通道由服务器执行");
+      return;
+    }
+    const out = body.on
+      ? await cruise.enableCruise(req.username, body.stock, body.qty)
+      : await cruise.disableCruise(req.username, body.stock);
+    if (!out.ok) {
+      sendFail(req, res, 400, "CRUISE_ENABLE_REJECTED", out.error);
+      return;
+    }
+    res.json({ ok: true, engine: cruiseEngineOn, ...out.state });
   })
 );
 
+// Cruise now runs on the server. Pages loaded before the switch still call these; answering
+// "not held / not claimed" makes them stand down instead of placing orders themselves.
 app.post(
-  "/api/cruise/rungs",
+  ["/api/cruise/rungs", "/api/cruise/lease", "/api/cruise/lease/release", "/api/cruise/claim", "/api/cruise/unclaim"],
   auth.requireUser,
-  asyncHandler(async (req, res) => {
-    const body = req.body || {};
-    const state = await db.saveCruiseRungs(
-      req.username,
-      body.channel,
-      body.stock,
-      body.rungs,
-      body.dropped,
-      body.lastDeal,
-      body.prevDeal
-    );
-    res.json({ ok: true, ...state });
-  })
-);
-
-app.post(
-  "/api/cruise/lease",
-  auth.requireUser,
-  asyncHandler(async (req, res) => {
-    const body = req.body || {};
-    const out = await db.renewCruiseLease(req.username, body.channel, body.stock, body.holder);
-    res.json({ ok: true, ...out });
-  })
-);
-
-app.post(
-  "/api/cruise/lease/release",
-  auth.requireUser,
-  asyncHandler(async (req, res) => {
-    const body = req.body || {};
-    const out = await db.releaseCruiseLease(req.username, body.channel, body.stock, body.holder);
-    res.json({ ok: true, ...out });
-  })
-);
-
-app.post(
-  "/api/cruise/claim",
-  auth.requireUser,
-  asyncHandler(async (req, res) => {
-    const body = req.body || {};
-    const out = await db.claimCruiseSeen(req.username, body.channel, body.kind, body.key, body.stock);
-    res.json({ ok: true, ...out });
-  })
-);
-
-app.post(
-  "/api/cruise/unclaim",
-  auth.requireUser,
-  asyncHandler(async (req, res) => {
-    const body = req.body || {};
-    const out = await db.unclaimCruiseSeen(req.username, body.channel, body.kind, body.key, body.stock);
-    res.json({ ok: true, ...out });
-  })
+  (_req, res) => {
+    res.json({ ok: true, held: false, claimed: false, reason: "server", message: "巡航已改由服务器执行，请刷新页面" });
+  }
 );
 
 app.use("/api", (req, res) => {
@@ -572,6 +541,16 @@ app.use((err, req, res, _next) => {
 
 async function main() {
   await db.ensureSchema();
+  if (cruiseEngineOn) {
+    cruise.start();
+    const shutdown = () => {
+      cruise.stop().finally(() => process.exit(0));
+    };
+    process.once("SIGTERM", shutdown);
+    process.once("SIGINT", shutdown);
+  } else {
+    console.log("cruise engine is off (set CRUISE_ENGINE=on to run it outside Azure)");
+  }
   app.listen(PORT, () => {
     console.log(`qmt-bridge listening on ${PORT}, mysql ${process.env.MYSQL_HOST}/${process.env.MYSQL_DATABASE}`);
     if (!TOKEN) {

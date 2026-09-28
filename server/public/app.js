@@ -42,7 +42,6 @@ const REQUEST_FADE_MS = 3000;
 const HANG_BAR_IDLE_MS = 5000;
 const HANG_BAR_FADE_MS = 3000;
 
-const cruiseHolder = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 let lastMetaText = "";
 let lastSyncText = "";
 let refreshing = false;
@@ -71,21 +70,7 @@ function emptyNs(id) {
     lastPendingList: [],
     cruiseOn: false,
     cruiseBusy: false,
-    seenDeals: new Set(),
-    seenFails: new Set(),
-    rungs: [],
-    dropped: new Set(),
-    rungsSig: "",
-    lastDeal: null,
-    prevDeal: null,
-    loaded: false,
-    seedNote: "",
-    sellGapFrom: 0,
-    sellGapTop: 0,
-    buyGapFrom: 0,
-    buyGapLow: 0,
-    gapNoteSell: "",
-    gapNoteBuy: "",
+    cruiseQty: 0,
   };
 }
 
@@ -739,9 +724,6 @@ async function postSimSnapshot(data) {
   rememberVersion(getLastGoodData().version, selectedStock());
   setLatestSync(getLastGoodData().updatedAt);
   renderLadder(buildLevels(getLastGoodData(), tickValue()), tickValue(), getLastGoodData());
-  if (cruiseOn && isSimMode()) {
-    await cruiseTick(getLastGoodData());
-  }
   return getLastGoodData();
 }
 
@@ -1312,7 +1294,6 @@ async function submitCancel() {
     if (!prev.some((x) => String(x.targetOrderId || x.target_order_id) === String(next.targetOrderId))) {
       getLastGoodData().pendingCancels = prev.concat(next);
     }
-    dropCruiseOrder(getLastGoodData().stock, info.orderId);
     renderLadder(buildLevels(getLastGoodData(), tickValue()), tickValue(), getLastGoodData());
   } catch (err) {
     setMeta(`撤单失败: ${err.message}`);
@@ -1381,7 +1362,7 @@ let cancelAllBusy = false;
 
 async function cancelAll(side) {
   if (cancelAllBusy || !getLastGoodData()) return;
-  if (cruiseOn && !isSimMode()) return;
+  if (cruiseOn) return;
   const { live, requests } = listSideCancels(getLastGoodData(), side);
   const total = live.length + requests.length;
   const label = side === "sell" ? "卖单" : "买单";
@@ -1398,7 +1379,6 @@ async function cancelAll(side) {
   let ok = 0;
   let fail = 0;
   try {
-    dropCruiseSide(getLastGoodData().stock, side);
     for (const info of live) {
       try {
         if (isSimMode()) {
@@ -1540,14 +1520,6 @@ function isUsableState(data) {
   );
 }
 
-function dealKey(row) {
-  const tid = String(row.m_strTradeID || row.trade_id || row.m_strDealID || row.m_strExecID || "");
-  if (tid) return `t:${tid}`;
-  const oid = String(row.order_id || row.m_strOrderSysID || "");
-  const t = String(row.m_strTradeTime || row.time || "");
-  return `o:${oid}:${t}:${dealPrice(row)}:${num(row.m_nVolume || row.qty)}`;
-}
-
 function pushAlert(text) {
   const root = document.getElementById("alerts");
   if (!root) return;
@@ -1564,35 +1536,8 @@ function pushAlert(text) {
   root.appendChild(el);
 }
 
-function noteCruiseFails(list, stock) {
-  const book = cruiseBook(stock);
-  if (!book.on) return;
-  Promise.resolve()
-    .then(async () => {
-      for (const row of list || []) {
-        if (row.source && row.source !== "cruise") continue;
-        const id = String(row.id);
-        if (book.seenFails.has(id)) continue;
-        const claimed = await claimCruiseKey("fail", id, stock);
-        book.seenFails.add(id);
-        if (!claimed) continue;
-        const label = row.side === "sell" ? "卖挂" : "买挂";
-        pushAlert(`${stockProfile(stock).label} ${label}失败 ${Number(row.price).toFixed(3)} × ${row.qty}：${row.errorMessage || "执行失败"}`);
-      }
-    })
-    .catch(() => {});
-}
-
-function cruiseChannel() {
-  return isSimMode() ? "sim" : "live";
-}
-
 function cruiseQuery(stock) {
-  return `channel=${encodeURIComponent(cruiseChannel())}&stock=${encodeURIComponent(normalizeStockId(stock || selectedStock()))}`;
-}
-
-function cruiseBody(extra, stock) {
-  return { channel: cruiseChannel(), stock: normalizeStockId(stock || selectedStock()), ...extra };
+  return `channel=live&stock=${encodeURIComponent(normalizeStockId(stock || selectedStock()))}`;
 }
 
 function paintCruise(on) {
@@ -1604,12 +1549,13 @@ function paintCruise(on) {
   if (btn) {
     btn.textContent = on ? "退出巡航" : "巡航";
     btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.disabled = isSimMode();
+    btn.title = isSimMode() ? "调试模式下不能巡航" : "";
   }
   const qty = document.getElementById("hang-qty");
-  if (qty) qty.disabled = on && !isSimMode();
-  const locked = on && !isSimMode();
+  if (qty) qty.disabled = on;
   document.querySelectorAll(".cancel-all-btn").forEach((el) => {
-    el.disabled = locked;
+    el.disabled = on;
   });
   paintStockSwitch();
 }
@@ -1620,14 +1566,7 @@ function applyCruiseFromServer(state, stock) {
   const book = cruiseBook(id);
   const on = Boolean(state.on);
   book.on = on;
-  book.seenDeals = new Set((state.seenDeals || []).map(String));
-  book.seenFails = new Set((state.seenFails || []).map(String));
-  if (Array.isArray(state.rungs)) book.rungs = state.rungs;
-  book.dropped = new Set((state.dropped || []).map(String));
-  book.lastDeal = normalizeSavedDeal(state.lastDeal);
-  book.prevDeal = normalizeSavedDeal(state.prevDeal);
-  book.loaded = true;
-  book.rungsSig = rungsSignature(book.rungs, book.dropped, book.lastDeal, book.prevDeal);
+  book.cruiseQty = Number(state.qty) || 0;
   if (id !== selectedStock()) {
     paintStockSwitch();
     return;
@@ -1635,11 +1574,8 @@ function applyCruiseFromServer(state, stock) {
   const was = cruiseOn;
   paintCruise(on);
   if (on && !was) {
-    const locked = on && !isSimMode();
-    if (locked) {
-      hideHangBar();
-      hideCancelBar();
-    }
+    hideHangBar();
+    hideCancelBar();
   }
 }
 
@@ -1651,11 +1587,6 @@ async function fetchCruiseState(stock) {
   if (!res.ok) return null;
   const data = await res.json().catch(() => null);
   return data && data.ok ? data : null;
-}
-
-async function syncCruiseFromServer() {
-  const state = await fetchCruiseState(selectedStock());
-  if (state) applyCruiseFromServer(state, selectedStock());
 }
 
 async function syncAllCruiseFlags() {
@@ -1681,788 +1612,58 @@ function pendingHangRequests(data) {
   });
 }
 
-function liveHangQtyMaps(data) {
-  const buy = new Map();
-  const sell = new Map();
-  const orderRows = (data && data.orders && data.orders.length ? data.orders : data && data.openOrders) || [];
-  for (const row of orderRows) {
-    const side = optSide(row) || "buy";
-    const remaining = num(row.m_nVolumeTotal);
-    if (!OPEN_STATUS.has(statusCode(row)) || !(remaining > 0)) continue;
-    const idx = priceToIdx(orderPrice(row), TICK);
-    const map = side === "sell" ? sell : buy;
-    map.set(idx, (map.get(idx) || 0) + remaining);
-  }
-  return { buy, sell };
-}
-
-function cruiseEnableError(data) {
-  if (!data) return "暂无行情与挂单，禁止巡航";
-  const pending = pendingHangRequests(data);
-  if (pending.length) {
-    const buys = pending.filter((x) => x.side === "buy").length;
-    const sells = pending.filter((x) => x.side === "sell").length;
-    return `有待执行的买挂或卖挂（买挂 ${buys} / 卖挂 ${sells}），禁止巡航`;
-  }
-  const { buy, sell } = liveHangQtyMaps(data);
-  if (!sell.size) return "没有卖挂，无法确定巡航点，禁止巡航";
-  const sellCruise = Math.min(...sell.keys());
-  if (buy.size) {
-    const buyHigh = Math.max(...buy.keys());
-    const spreadTicks = sellCruise - buyHigh;
-    const needTicks = Math.round(stockProfile(data && data.stock).minSpread * tickScale(TICK));
-    if (spreadTicks < needTicks) {
-      const spread = spreadTicks / tickScale(TICK);
-      const need = stockProfile(data && data.stock).minSpread;
-      return `最高买挂与卖挂价差 ${spread.toFixed(3)} < ${need.toFixed(3)}，禁止巡航`;
-    }
-  }
-  return "";
-}
-
-function cruiseAnchorIdx(data, maps) {
-  const profile = stockProfile(data && data.stock);
-  const { buy, sell } = maps || liveHangQtyMaps(data);
-  const gapTicks = Math.round(profile.minSpread * tickScale(TICK));
-  const bidIdx = num(data.bid1) > 0 ? priceToIdx(data.bid1, TICK) : 0;
-  const askIdx = num(data.ask1) > 0 ? priceToIdx(data.ask1, TICK) : 0;
-  let sellCruise = sell.size ? Math.min(...sell.keys()) : 0;
-  if (!sellCruise && askIdx > 0) sellCruise = askIdx;
-  let buyCruise = sellCruise ? sellCruise - gapTicks : 0;
-  if (bidIdx > 0) buyCruise = buyCruise ? Math.min(buyCruise, bidIdx) : bidIdx;
-  return { buy, sell, buyCruise, sellCruise, profile };
-}
-
-function cruiseFillPlans(data, opts) {
-  const maps = hangMapsWithPending(data);
-  const { buy, sell, buyCruise, sellCruise, profile } = cruiseAnchorIdx(data, maps);
-  const target = hangQty(data && data.stock);
-  const buyStep = Math.max(1, Math.round(profile.buyStep * tickScale(TICK)));
-  const sellStep = Math.max(1, Math.round(profile.sellStep * tickScale(TICK)));
-  const want = new Set((opts && opts.sides) || ["buy", "sell"]);
-  const plans = [];
-  function addSide(side, startIdx, dir, have) {
-    if (!(startIdx > 0)) return;
-    for (let i = 0; i < profile.levels; i++) {
-      const idx = startIdx + dir * i;
-      const need = target - (have.get(idx) || 0);
-      if (need <= 0) continue;
-      const qty = Math.floor(need / 100) * 100;
-      if (qty > 0) plans.push({ side, price: idxToPrice(idx, TICK), qty, coverQty: target });
-    }
-  }
-  if (want.has("buy")) addSide("buy", buyCruise, -buyStep, buy);
-  if (want.has("sell")) addSide("sell", sellCruise, sellStep, sell);
-  return plans;
-}
-
-function hangMapsWithPending(data) {
-  const { buy, sell } = liveHangQtyMaps(data);
-  for (const row of pendingHangRequests(data)) {
-    const idx = priceToIdx(num(row.price), TICK);
-    const map = row.side === "sell" ? sell : buy;
-    map.set(idx, (map.get(idx) || 0) + num(row.qty));
-  }
-  return { buy, sell };
-}
-
-function cruiseBasePrice(data, row) {
-  const oid = String(row.order_id || row.m_strOrderSysID || row.m_strOrderRef || "");
-  const orderRows = (data && data.orders && data.orders.length ? data.orders : data && data.openOrders) || [];
-  if (oid) {
-    for (const order of orderRows) {
-      const id = String(order.order_id || order.m_strOrderSysID || order.m_strOrderRef || "");
-      if (id && id === oid) {
-        const px = orderPrice(order);
-        if (px > 0) return px;
-      }
-    }
-  }
-  return dealPrice(row);
-}
-
-function dealTimeRank(row) {
-  const dateDigits = String(row.m_strTradeDate || row.date || "").replace(/\D/g, "");
-  const raw = String(row.m_strTradeTime || row.time || row.m_strInsertTime || row.m_strTime || "").trim();
-  const digits = raw.replace(/\D/g, "");
-  if (digits.length >= 6) {
-    const hh = Number(digits.slice(0, 2)) || 0;
-    const mm = Number(digits.slice(2, 4)) || 0;
-    const ss = Number(digits.slice(4, 6)) || 0;
-    const ms = digits.length > 6 ? Number(digits.slice(6).padEnd(3, "0").slice(0, 3)) || 0 : 0;
-    const day = dateDigits.length >= 8 ? Number(dateDigits.slice(0, 8)) || 0 : 0;
-    return day * 1e10 + hh * 1e8 + mm * 1e6 + ss * 1e3 + ms;
-  }
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
-function compareCruiseDeals(data, a, b) {
-  const ta = dealTimeRank(a);
-  const tb = dealTimeRank(b);
-  if (ta !== tb) return ta - tb;
-  const sa = optSide(a);
-  const sb = optSide(b);
-  if (sa !== sb) {
-    if (sa === "sell") return -1;
-    if (sb === "sell") return 1;
-  }
-  const pa = cruiseBasePrice(data, a);
-  const pb = cruiseBasePrice(data, b);
-  if (sa === "sell") return pa - pb;
-  return pb - pa;
-}
-
-function roundTickPx(px) {
-  const scale = tickScale(TICK);
-  return Math.round(num(px) * scale) / scale;
-}
-
-function clampCruiseHangPx(side, px, data) {
-  let out = roundTickPx(px);
-  const bid = num(data && data.bid1);
-  const ask = num(data && data.ask1);
-  if (side === "buy" && bid > 0 && out > bid + 1e-9) out = roundTickPx(bid);
-  if (side === "sell" && ask > 0 && out < ask - 1e-9) out = roundTickPx(ask);
-  return out;
-}
-
-function isRetryableHangError(message) {
-  const s = String(message || "");
-  return s.includes("买1") || s.includes("卖1");
-}
-
-function rememberPendingHang(order, fallback) {
-  if (!order || !order.id) return;
-  const next = {
-    id: order.id,
-    account: order.account,
-    stock: order.stock,
-    side: order.side || fallback.side,
-    price: Number(order.price),
-    qty: Number(order.qty),
-    status: order.status || "pending",
-    source: order.source || fallback.source || "",
-  };
-  const stock = normalizeStockId(next.stock || (fallback && fallback.stock) || selectedStock());
-  const ns = stockNs(stock);
-  const target = ns.data;
-  if (!target) return;
-  const prev = target.pendingHangs || [];
-  if (!prev.some((x) => Number(x.id) === Number(next.id))) {
-    target.pendingHangs = prev.concat(next);
-  }
-  ns.data = target;
-  if (stock === selectedStock()) {
-    renderLadder(buildLevels(target, tickValue()), tickValue(), target);
-  }
-}
-
-async function postHangOrder({ side, price, qty, stock, account, source, coverQty }) {
-  const res = await fetch("/api/hang", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ side, price, qty, stock, account, source, coverQty }),
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
-  if (body.covered) return { covered: true };
-  return body.order || {};
-}
-
-async function renewCruiseLease(stock) {
-  const res = await fetch("/api/cruise/lease", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cruiseBody({ holder: cruiseHolder }, stock)),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok) return { held: false, reason: "missing" };
-  return { held: Boolean(data.held), reason: data.reason || "" };
-}
-
-function releaseCruiseLease(stock) {
-  const body = JSON.stringify(cruiseBody({ holder: cruiseHolder }, stock));
-  if (navigator.sendBeacon) {
-    navigator.sendBeacon("/api/cruise/lease/release", new Blob([body], { type: "application/json" }));
-    return;
-  }
-  fetch("/api/cruise/lease/release", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body,
-    keepalive: true,
-  }).catch(() => {});
-}
-
-async function postCruiseState(on, stock) {
-  const id = normalizeStockId(stock || selectedStock());
-  const res = await fetch("/api/cruise", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cruiseBody({ on }, id)),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
-  applyCruiseFromServer(data, id);
-}
-
+// The server validates, fills both ladders and then keeps cruising after this page closes.
 async function setCruise(on) {
-  // The user may switch stocks while fills are in flight; pin everything to the stock clicked.
+  if (isSimMode()) return;
   const stock = selectedStock();
-  const data = getLastGoodData();
   const book = cruiseBook(stock);
   if (book.busy) return;
-  if (on) {
-    const reason = cruiseEnableError(data);
-    if (reason) {
-      pushAlert(reason);
-      window.alert(reason);
-      return;
-    }
-  }
   book.busy = true;
+  const btn = document.getElementById("cruise-btn");
+  if (btn) btn.disabled = true;
   try {
-    if (on) {
-      const plans = cruiseFillPlans(data);
-      for (const plan of plans) {
-        const label = plan.side === "sell" ? "卖挂" : "买挂";
-        try {
-          const lease = await renewCruiseLease(stock);
-          if (!lease.held && lease.reason === "busy") break;
-          const order = await postHangOrder({
-            ...plan,
-            stock: data.stock || stock,
-            account: data.account,
-            source: "cruise",
-          });
-          if (order && order.covered) continue;
-          rememberPendingHang(order, { ...plan, stock: data.stock || stock, source: "cruise" });
-        } catch (err) {
-          const reason = `${stockProfile(stock).label} 巡航补单失败：${label} ${plan.price.toFixed(3)} × ${plan.qty}：${err.message}`;
-          pushAlert(reason);
-          window.alert(reason);
-          return;
-        }
-      }
+    const res = await fetch("/api/cruise", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel: "live", stock, on, qty: hangQty(stock) }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    applyCruiseFromServer(data, stock);
+    if (on && data.engine === false) {
+      pushAlert("服务器巡航引擎未启动（本地服务默认关闭），巡航开关已保存但不会自动挂单");
     }
-    await postCruiseState(on, stock);
-    if (on) await renewCruiseLease(stock);
-    else releaseCruiseLease(stock);
+    pollCruiseAlerts().catch(() => {});
   } catch (err) {
-    const reason = `巡航同步失败：${err.message}`;
+    const reason = `${stockProfile(stock).label} ${on ? "开启" : "退出"}巡航失败：${err.message}`;
     pushAlert(reason);
     if (on) window.alert(reason);
   } finally {
     book.busy = false;
+    if (btn) btn.disabled = isSimMode();
   }
 }
 
-async function claimCruiseKey(kind, key, stock) {
-  const res = await fetch("/api/cruise/claim", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cruiseBody({ kind, key }, stock)),
-  });
-  const data = await res.json().catch(() => ({}));
-  return Boolean(data.claimed);
-}
+let cruiseAlertAfter = null;
 
-async function unclaimCruiseKey(kind, key, stock) {
-  await fetch("/api/cruise/unclaim", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cruiseBody({ kind, key }, stock)),
-  }).catch(() => {});
-}
-
-async function placeCruisePlans(data, plans, failPrefix) {
-  const prefix = failPrefix || "巡航补档失败";
-  for (const plan of plans) {
-    const lease = await renewCruiseLease(data.stock);
-    if (!lease.held) return;
-    const label = plan.side === "sell" ? "卖挂" : "买挂";
-    try {
-      const order = await postHangOrder({
-        ...plan,
-        stock: data.stock,
-        account: data.account,
-        source: "cruise",
-      });
-      if (order && order.covered) continue;
-      rememberPendingHang(order, { ...plan, stock: data.stock, source: "cruise" });
-    } catch (err) {
-      pushAlert(`${prefix}：${label} ${plan.price.toFixed(3)} × ${plan.qty}：${err.message}`);
-    }
+// Shows warnings/errors the server-side cruise engine logged since this page was opened.
+async function pollCruiseAlerts() {
+  if (cruiseAlertAfter == null) {
+    const res = await fetch("/api/logs?source=cruise&tail=1", { cache: "no-store", credentials: "same-origin" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) return;
+    cruiseAlertAfter = Number(data.lastId) || 0;
+    return;
   }
-}
-
-async function maintainCruiseRungs(data) {
-  if (!data) return;
-  const book = cruiseBook(data.stock);
-  if ((book.rungs || []).length && !liveOpenRungs(data, book.dropped).length) return;
-  const { sell } = hangMapsWithPending(data);
-  const plans = cruiseFillPlans(data, { sides: ["buy"] });
-  if (!sell.size) plans.push(...cruiseFillPlans(data, { sides: ["sell"] }));
-  if (!plans.length) return;
-  await placeCruisePlans(data, plans);
-}
-
-function orderRowId(row) {
-  return String((row && (row.order_id || row.m_strOrderSysID || row.m_strOrderRef)) || "");
-}
-
-function rungsSignature(rungs, dropped, lastDeal, prevDeal) {
-  const body = (rungs || []).map((r) => `${r.side}:${r.price}:${r.qty}:${r.orderId || ""}`).join("|");
-  const drop = [...(dropped || [])].map(String).sort().join(",");
-  const deal = (row) => (row ? `${row.side}:${row.price}:${row.date}:${row.rank}` : "");
-  return `${body}#${drop}#${deal(lastDeal)}#${deal(prevDeal)}`;
-}
-
-function liveOpenRungs(data, dropped) {
-  const rows = (data && data.orders && data.orders.length ? data.orders : (data && data.openOrders) || []);
-  const skip = dropped || new Set();
-  const out = [];
-  for (const row of rows) {
-    const side = optSide(row);
-    if (side !== "buy" && side !== "sell") continue;
-    const remaining = num(row.m_nVolumeTotal);
-    if (!OPEN_STATUS.has(statusCode(row)) || !(remaining > 0)) continue;
-    const orderId = orderRowId(row);
-    if (orderId && skip.has(orderId)) continue;
-    const qty = Math.floor(remaining / 100) * 100;
-    const price = roundTickPx(orderPrice(row));
-    if (!(price > 0) || !(qty > 0)) continue;
-    out.push({ side, price, qty, orderId });
-  }
-  return out;
-}
-
-async function persistCruiseRungs(stock) {
-  const book = cruiseBook(stock);
-  if (!book.loaded) return;
-  const sig = rungsSignature(book.rungs, book.dropped, book.lastDeal, book.prevDeal);
-  if (sig === book.rungsSig) return;
-  const res = await fetch("/api/cruise/rungs", {
-    method: "POST",
+  const res = await fetch(`/api/logs?source=cruise&level=warn&after=${cruiseAlertAfter}&limit=50`, {
+    cache: "no-store",
     credentials: "same-origin",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(cruiseBody({
-      rungs: book.rungs,
-      dropped: [...book.dropped],
-      lastDeal: book.lastDeal,
-      prevDeal: book.prevDeal,
-    }, stock)),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.ok) return;
-  book.rungsSig = sig;
-}
-
-function rememberLiveCruiseRungs(data) {
-  if (!data) return;
-  const stock = normalizeStockId(data.stock || selectedStock());
-  const book = cruiseBook(stock);
-  if (!book.on) return;
-  const live = liveOpenRungs(data, book.dropped);
-  if (!live.length) return;
-  book.rungs = live;
-  persistCruiseRungs(stock).catch(() => {});
-}
-
-function dropCruiseOrder(stock, orderId) {
-  const id = String(orderId || "");
-  if (!id) return;
-  const book = cruiseBook(stock);
-  book.dropped.add(id);
-  book.rungs = (book.rungs || []).filter((rung) => rung.orderId !== id);
-  persistCruiseRungs(stock).catch(() => {});
-}
-
-function dropCruiseSide(stock, side) {
-  const book = cruiseBook(stock);
-  for (const rung of book.rungs || []) {
-    if (rung.side === side && rung.orderId) book.dropped.add(rung.orderId);
-  }
-  book.rungs = (book.rungs || []).filter((rung) => rung.side !== side);
-  persistCruiseRungs(stock).catch(() => {});
-}
-
-function resumeCruisePlans(data) {
-  const stock = normalizeStockId(data.stock || selectedStock());
-  const book = cruiseBook(stock);
-  const saved = book.rungs || [];
-  if (!book.on || !saved.length || !Array.isArray(data.orders)) return [];
-  const covered = hangMapsWithPending(data);
-  const byId = new Map();
-  for (const row of data.orders) {
-    const id = orderRowId(row);
-    if (id) byId.set(id, row);
-  }
-  const anyStillOpen = saved.some((rung) => {
-    const row = byId.get(rung.orderId);
-    return row && OPEN_STATUS.has(statusCode(row)) && num(row.m_nVolumeTotal) > 0;
-  });
-  const plans = [];
-  for (const rung of saved) {
-    if (rung.orderId && book.dropped.has(rung.orderId)) continue;
-    const idx = priceToIdx(rung.price, TICK);
-    const have = (rung.side === "sell" ? covered.sell : covered.buy).get(idx) || 0;
-    if (have >= rung.qty) continue;
-    const row = rung.orderId ? byId.get(rung.orderId) : null;
-    if (row && OPEN_STATUS.has(statusCode(row)) && num(row.m_nVolumeTotal) > 0) continue;
-    if (row && statusCode(row) === 56) continue;
-    const cancelled = row && CANCEL_STATUS.has(statusCode(row));
-    const rolledOff = !row && !anyStillOpen;
-    if (!cancelled && !rolledOff) continue;
-    const askIdx = num(data.ask1) > 0 ? priceToIdx(data.ask1, TICK) : 0;
-    const bidIdx = num(data.bid1) > 0 ? priceToIdx(data.bid1, TICK) : 0;
-    if (rung.side === "sell" && askIdx > 0 && idx < askIdx) continue;
-    if (rung.side === "buy" && bidIdx > 0 && idx > bidIdx) continue;
-    const qty = Math.floor((rung.qty - have) / 100) * 100;
-    if (qty > 0) plans.push({ side: rung.side, price: rung.price, qty, coverQty: rung.qty });
-  }
-  return plans;
-}
-
-function cruiseLadderIdxs(data, side) {
-  const maps = hangMapsWithPending(data);
-  const live = side === "sell" ? maps.sell : maps.buy;
-  if (live.size) return [...live.keys()];
-  const book = cruiseBook(data && data.stock);
-  const idxs = [];
-  for (const rung of book.rungs || []) {
-    if (rung.side !== side) continue;
-    if (rung.orderId && book.dropped.has(rung.orderId)) continue;
-    const idx = priceToIdx(rung.price, TICK);
-    if (idx > 0) idxs.push(idx);
-  }
-  return idxs;
-}
-
-function pushCruiseGap(plans, side, idx, have, target) {
-  const qty = Math.floor((target - (have.get(idx) || 0)) / 100) * 100;
-  if (qty > 0) plans.push({ side, price: idxToPrice(idx, TICK), qty, coverQty: target });
-}
-
-function cruiseGapPlans(data) {
-  if (!data) return [];
-  const stock = normalizeStockId(data.stock || selectedStock());
-  const book = cruiseBook(stock);
-  const profile = stockProfile(stock);
-  const maps = hangMapsWithPending(data);
-  const target = hangQty(stock);
-  const buyStep = Math.max(1, Math.round(profile.buyStep * tickScale(TICK)));
-  const sellStep = Math.max(1, Math.round(profile.sellStep * tickScale(TICK)));
-  const levels = profile.levels;
-  const askIdx = num(data.ask1) > 0 ? priceToIdx(data.ask1, TICK) : 0;
-  const bidIdx = num(data.bid1) > 0 ? priceToIdx(data.bid1, TICK) : 0;
-  const plans = [];
-
-  const sellIdxs = cruiseLadderIdxs(data, "sell");
-  const sellHigh = sellIdxs.length ? Math.max(...sellIdxs) : 0;
-  if (askIdx > 0 && sellHigh > 0 && askIdx > sellHigh) {
-    book.sellGapFrom = askIdx;
-    book.sellGapTop = askIdx + levels * sellStep;
-  } else if (book.sellGapFrom && askIdx > book.sellGapFrom) {
-    book.sellGapFrom = askIdx;
-    book.sellGapTop = askIdx + levels * sellStep;
-  }
-  if (book.sellGapFrom && book.sellGapTop) {
-    const before = plans.length;
-    for (let idx = book.sellGapFrom; idx <= book.sellGapTop; idx += sellStep) {
-      pushCruiseGap(plans, "sell", idx, maps.sell, target);
-    }
-    if (plans.length === before) {
-      book.sellGapFrom = 0;
-      book.sellGapTop = 0;
-    } else {
-      const sig = `sell:${book.sellGapFrom}:${book.sellGapTop}`;
-      if (book.gapNoteSell !== sig) {
-        book.gapNoteSell = sig;
-        const fromPx = idxToPrice(book.sellGapFrom, TICK);
-        const toPx = idxToPrice(book.sellGapTop, TICK);
-        pushAlert(`${profile.label} 卖一 ${fromPx.toFixed(3)} 击穿卖挂，卖挂从 ${fromPx.toFixed(3)} 补到 ${toPx.toFixed(3)}`);
-      }
-    }
-  }
-
-  const buyIdxs = cruiseLadderIdxs(data, "buy");
-  const buyLow = buyIdxs.length ? Math.min(...buyIdxs) : 0;
-  if (bidIdx > 0 && buyLow > 0 && bidIdx < buyLow) {
-    book.buyGapFrom = bidIdx;
-    book.buyGapLow = bidIdx - levels * buyStep;
-  } else if (book.buyGapFrom && bidIdx > 0 && bidIdx < book.buyGapFrom) {
-    book.buyGapFrom = bidIdx;
-    book.buyGapLow = bidIdx - levels * buyStep;
-  }
-  if (book.buyGapFrom && book.buyGapLow) {
-    const before = plans.length;
-    for (let idx = book.buyGapFrom; idx >= book.buyGapLow && idx > 0; idx -= buyStep) {
-      pushCruiseGap(plans, "buy", idx, maps.buy, target);
-    }
-    if (plans.length === before) {
-      book.buyGapFrom = 0;
-      book.buyGapLow = 0;
-    } else {
-      const sig = `buy:${book.buyGapFrom}:${book.buyGapLow}`;
-      if (book.gapNoteBuy !== sig) {
-        book.gapNoteBuy = sig;
-        const fromPx = idxToPrice(book.buyGapFrom, TICK);
-        const toPx = idxToPrice(book.buyGapLow, TICK);
-        pushAlert(`${profile.label} 买一 ${fromPx.toFixed(3)} 击穿买挂，买挂从 ${fromPx.toFixed(3)} 补到 ${toPx.toFixed(3)}`);
-      }
-    }
-  }
-  return plans;
-}
-
-function shanghaiTodayDigits() {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-  return parts.replace(/\D/g, "");
-}
-
-function dealDateDigits(row) {
-  const raw = String((row && (row.m_strTradeDate || row.date || row.m_strInsertDate)) || "").replace(/\D/g, "");
-  return raw.length >= 8 ? raw.slice(0, 8) : "";
-}
-
-function normalizeSavedDeal(raw) {
-  if (!raw || (raw.side !== "buy" && raw.side !== "sell")) return null;
-  const price = roundTickPx(raw.price);
-  const date = String(raw.date || "").replace(/\D/g, "").slice(0, 8);
-  if (!(price > 0) || date.length < 8) return null;
-  return { side: raw.side, price, date, rank: num(raw.rank) };
-}
-
-function rememberSessionDeals(data) {
-  if (!data) return;
-  const stock = normalizeStockId(data.stock || selectedStock());
-  const book = cruiseBook(stock);
-  if (!book.loaded) return;
-  const rows = [];
-  for (const row of data.deals || []) {
-    const side = optSide(row);
-    const price = roundTickPx(dealPrice(row));
-    const date = dealDateDigits(row);
-    if ((side !== "buy" && side !== "sell") || !(price > 0) || !date) continue;
-    rows.push({ side, price, date, rank: dealTimeRank(row) });
-  }
-  if (!rows.length) return;
-  let latest = book.lastDeal;
-  let prev = book.prevDeal;
-  rows.sort((a, b) => a.rank - b.rank);
-  for (const deal of rows) {
-    if (latest && deal.date > latest.date) prev = latest;
-    if (!latest || deal.rank > latest.rank) latest = deal;
-  }
-  if (latest) {
-    for (const deal of rows) {
-      if (deal.date < latest.date && (!prev || deal.rank > prev.rank)) prev = deal;
-    }
-  }
-  const before = rungsSignature(book.rungs, book.dropped, book.lastDeal, book.prevDeal);
-  book.lastDeal = latest;
-  book.prevDeal = prev;
-  if (rungsSignature(book.rungs, book.dropped, book.lastDeal, book.prevDeal) !== before) {
-    persistCruiseRungs(stock).catch(() => {});
-  }
-}
-
-function yesterdayLastDeal(data, book) {
-  const today = shanghaiTodayDigits();
-  let best = null;
-  for (const row of (data && data.deals) || []) {
-    const date = dealDateDigits(row);
-    const side = optSide(row);
-    const price = roundTickPx(dealPrice(row));
-    if (!date || date >= today || (side !== "buy" && side !== "sell") || !(price > 0)) continue;
-    const rank = dealTimeRank(row);
-    if (!best || rank > best.rank) best = { side, price, date, rank };
-  }
-  if (best) return best;
-  if (book.prevDeal && book.prevDeal.date < today) return book.prevDeal;
-  if (book.lastDeal && book.lastDeal.date < today) return book.lastDeal;
-  return null;
-}
-
-function seedCruisePlans(data) {
-  const stock = normalizeStockId(data.stock || selectedStock());
-  const book = cruiseBook(stock);
-  if (!book.on || (book.rungs || []).length) return [];
-  if (liveOpenRungs(data, book.dropped).length) return [];
-  const deal = yesterdayLastDeal(data, book);
-  if (!deal) return [];
-  const profile = stockProfile(stock);
-  const step = deal.side === "sell" ? profile.sellStep : profile.reverseGap;
-  const sellPx = roundTickPx(deal.price + step);
-  const sellIdx = priceToIdx(sellPx, TICK);
-  if (!(sellIdx > 0)) return [];
-  const gapTicks = Math.round(profile.minSpread * tickScale(TICK));
-  const buyIdx = sellIdx - gapTicks;
-  const target = hangQty(stock);
-  const covered = hangMapsWithPending(data);
-  const buyStep = Math.max(1, Math.round(profile.buyStep * tickScale(TICK)));
-  const sellStep = Math.max(1, Math.round(profile.sellStep * tickScale(TICK)));
-  const plans = [];
-  function add(side, start, dir, have) {
-    if (!(start > 0)) return;
-    for (let i = 0; i < profile.levels; i += 1) {
-      const idx = start + dir * i;
-      const qty = Math.floor((target - (have.get(idx) || 0)) / 100) * 100;
-      if (qty > 0) plans.push({ side, price: idxToPrice(idx, TICK), qty, coverQty: target });
-    }
-  }
-  add("sell", sellIdx, sellStep, covered.sell);
-  add("buy", buyIdx, -buyStep, covered.buy);
-  const note = `${deal.date}:${deal.side}:${deal.price}`;
-  if (plans.length && book.seedNote !== note) {
-    book.seedNote = note;
-    const verb = deal.side === "sell" ? "卖成" : "买成";
-    pushAlert(`${profile.label} 无续航档位，按昨日最后一笔${verb} ${deal.price.toFixed(3)}，卖挂从 ${sellPx.toFixed(3)} 开始`);
-  }
-  return plans;
-}
-
-function cruiseReversePlan(data, row) {
-  const side = optSide(row);
-  if (side !== "buy" && side !== "sell") return null;
-  const basePx = cruiseBasePrice(data, row);
-  const qty = Math.round(num(row.m_nVolume || row.qty));
-  if (!(basePx > 0) || !(qty > 0)) return null;
-  const nextSide = side === "sell" ? "buy" : "sell";
-  const gap = stockProfile(data && data.stock).reverseGap;
-  const rawPx = roundTickPx(basePx + (side === "sell" ? -gap : gap));
-  const nextPx = clampCruiseHangPx(nextSide, rawPx, data);
-  return { side: nextSide, price: nextPx, qty };
-}
-
-async function cruiseTick(data) {
-  if (!data) return;
-  const stock = normalizeStockId(data.stock || selectedStock());
-  const book = cruiseBook(stock);
-  if (!book.loaded) return;
-  rememberSessionDeals(data);
-  if (!book.on) return;
-  const lease = await renewCruiseLease(stock);
-  if (!lease.held || book.busy) return;
-  noteCruiseFails(data.failedHangs, stock);
-  rememberSessionDeals(data);
-  rememberLiveCruiseRungs(data);
-  const resumePlans = resumeCruisePlans(data);
-  const seedPlans = resumePlans.length ? [] : seedCruisePlans(data);
-  const deals = Array.isArray(data.deals) ? data.deals : [];
-  const fresh = [];
-  for (const row of deals) {
-    const key = dealKey(row);
-    if (!key || book.seenDeals.has(key)) continue;
-    fresh.push({ row, key });
-  }
-  fresh.sort((a, b) => compareCruiseDeals(data, a.row, b.row));
-  const buyTopUp = cruiseFillPlans(data, { sides: ["buy"] });
-  const gapPlans = cruiseGapPlans(data);
-  if (!fresh.length && !buyTopUp.length && !resumePlans.length && !seedPlans.length && !gapPlans.length) return;
-  book.busy = true;
-  try {
-    const merged = new Map();
-    for (const { row, key } of fresh) {
-      const claimed = await claimCruiseKey("deal", key, stock);
-      if (!claimed) {
-        book.seenDeals.add(key);
-        continue;
-      }
-      const plan = cruiseReversePlan(data, row);
-      if (!plan) {
-        book.seenDeals.add(key);
-        continue;
-      }
-      const slot = `${plan.side}:${priceToIdx(plan.price, TICK)}`;
-      const cur = merged.get(slot);
-      if (cur) {
-        cur.qty += plan.qty;
-        cur.keys.push(key);
-      } else {
-        merged.set(slot, { side: plan.side, price: plan.price, qty: plan.qty, keys: [key] });
-      }
-    }
-
-    for (const plan of merged.values()) {
-      const qty = Math.floor(plan.qty / 100) * 100;
-      const label = plan.side === "sell" ? "卖挂" : "买挂";
-      if (!(qty > 0)) {
-        for (const key of plan.keys) book.seenDeals.add(key);
-        continue;
-      }
-      try {
-        const still = await renewCruiseLease(stock);
-        if (!still.held) break;
-        const order = await postHangOrder({
-          side: plan.side,
-          price: plan.price,
-          qty,
-          stock: data.stock || stock,
-          account: data.account,
-          source: "cruise",
-        });
-        if (order && order.covered) {
-          for (const key of plan.keys) book.seenDeals.add(key);
-          continue;
-        }
-        rememberPendingHang(order, { side: plan.side, stock: data.stock || stock, source: "cruise" });
-        for (const key of plan.keys) book.seenDeals.add(key);
-      } catch (err) {
-        pushAlert(`${stockProfile(stock).label} ${label}失败 ${plan.price.toFixed(3)} × ${qty}：${err.message}`);
-        if (isRetryableHangError(err.message)) {
-          for (const key of plan.keys) await unclaimCruiseKey("deal", key, stock);
-        } else {
-          for (const key of plan.keys) book.seenDeals.add(key);
-        }
-      }
-    }
-    if (gapPlans.length) await placeCruisePlans(data, gapPlans, "跳空补档");
-    if (resumePlans.length) await placeCruisePlans(data, resumePlans, "跨天续航");
-    if (seedPlans.length) await placeCruisePlans(data, seedPlans, "按昨日成交续航");
-    await maintainCruiseRungs(stockNs(stock).data || data);
-  } finally {
-    book.busy = false;
-  }
-}
-
-async function cruiseOtherStocks() {
-  for (const s of STOCKS) {
-    if (s.id === selectedStock()) continue;
-    const state = await fetchCruiseState(s.id);
-    if (state) applyCruiseFromServer(state, s.id);
-    if (!state || !state.on) continue;
-    try {
-      const res = await fetch(`/api/state?since=${sinceForStock(s.id)}&stock=${encodeURIComponent(s.id)}`, {
-        cache: "no-store",
-        credentials: "same-origin",
-      });
-      if (!res.ok) continue;
-      const data = await res.json();
-      if (data.unchanged) {
-        const cached = stockNs(s.id).data;
-        if (cached) await cruiseTick(cached);
-        continue;
-      }
-      if (!isUsableState(data) && !(data.pendingHangs || []).length) continue;
-      stockNs(s.id).data = data;
-      stockNs(s.id).version = Number(data.version) || stockNs(s.id).version;
-      await cruiseTick(data);
-    } catch (_err) {}
-  }
+  for (const item of data.items || []) pushAlert(`巡航：${item.message}`);
+  cruiseAlertAfter = Math.max(cruiseAlertAfter, Number(data.nextAfter) || 0);
 }
 
 async function refresh(expectedEpoch) {
@@ -2495,8 +1696,7 @@ async function refresh(expectedEpoch) {
         if (Array.isArray(data.pendingCancels)) ns.data.pendingCancels = data.pendingCancels;
         renderLadder(buildLevels(ns.data, tick), tick, ns.data);
       }
-      cruiseTick(ns.data || { ...data, stock }).catch(() => {});
-      cruiseOtherStocks().catch(() => {});
+      pollCruiseAlerts().catch(() => {});
       return;
     }
 
@@ -2525,8 +1725,7 @@ async function refresh(expectedEpoch) {
     setLastGoodData(data);
     paintStateMeta(data, stock);
     renderLadder(buildLevels(data, tick), tick, data);
-    cruiseTick(data).catch(() => {});
-    cruiseOtherStocks().catch(() => {});
+    pollCruiseAlerts().catch(() => {});
   } catch (err) {
     if (epoch !== viewEpoch) return;
     ns.emptyStreak += 1;
@@ -2622,10 +1821,6 @@ async function switchStock(id) {
 }
 
 
-window.addEventListener("pagehide", () => {
-  for (const s of STOCKS) releaseCruiseLease(s.id);
-});
-
 restoreCruise();
 refresh().catch((err) => {
   setMeta(`拉取失败: ${err.message}`);
@@ -2654,7 +1849,7 @@ ensureCancelBar();
 wireCancelBarButtons();
 
 document.getElementById("ladder").addEventListener("click", (ev) => {
-  if (cruiseOn && !isSimMode()) return;
+  if (cruiseOn) return;
   const hangTag = ev.target.closest(".tag.hang.live, .tag.hang.canceling, .tag.hang.request");
   if (hangTag) {
     ev.stopPropagation();
