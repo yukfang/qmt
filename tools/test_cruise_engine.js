@@ -62,6 +62,11 @@ function makeFakeDb() {
       return { ok: true };
     },
     async listFailedHangs() { return state.failed; },
+    async createCancelOrder({ targetOrderId, price, qty }) {
+      const row = { id: state.nextId++, action: "cancel", targetOrderId, price, qty };
+      (state.cancels = state.cancels || []).push(row);
+      return row;
+    },
     async createHangOrder({ side, price, qty, coverQty }) {
       if (side === "buy" && state.rejectBuyAbove != null && price > state.rejectBuyAbove) {
         throw new Error(`买挂只能在买1及下方（买1=${state.rejectBuyAbove}）`);
@@ -185,6 +190,67 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   await cruise.tickAll();
   assert.strictEqual(s.placed.length, 0);
   console.log("9 disable ok");
+
+  // --- enable without any sell hang: anchor on the last deal ---
+  const reset = (snap, last) => {
+    s.snapshot = { account: "A", stock: "159781.SZ", updatedAt: 1, ...snap, lastDeal: last };
+    s.pending = [];
+    s.placed = [];
+    s.cancels = [];
+    s.seen = new Set();
+    s.cruise = { on: false, qty: 0, rungs: [], dropped: [], lastDeal: null, prevDeal: null };
+  };
+  const prices = (side) => s.placed.filter((o) => o.side === side).map((o) => o.price.toFixed(3));
+
+  // 10. last deal = sell 1.001 yesterday; live buys at 0.994 (violates spread) and 0.980
+  reset({ bid1: 0.994, ask1: 0.995, orders: [order("buy", 0.994, 5000, 50, "B1"), order("buy", 0.98, 5000, 50, "B2")], deals: [] },
+    { side: "sell", price: 1.001, qty: 5000, date: "20260926", time: "145200" });
+  out = await cruise.enableCruise("u", "159781.SZ", 5000);
+  assert.ok(out.ok, out.error);
+  assert.deepStrictEqual(s.cancels.map((c) => c.targetOrderId), ["B1"], "cancel the buy above 0.990");
+  assert.strictEqual(prices("sell")[0], "1.002");
+  assert.strictEqual(prices("sell").length, 10);
+  assert.strictEqual(prices("buy")[0], "0.990");
+  assert.ok(!prices("buy").includes("0.994"), "no buy re-hung at the cancelled price");
+  assert.ok(s.cruise.dropped.includes("B1"), "cancelled buy is marked dropped");
+  assert.ok(out.note.includes("卖成 1.001") && out.note.includes("1.002") && out.note.includes("撤销 1 笔"), out.note);
+  console.log("10 last sell ok:", out.note, "| sells", prices("sell")[0], "..", prices("sell").slice(-1)[0], "| buys", prices("buy")[0], "..", prices("buy").slice(-1)[0]);
+
+  // 11. last deal = buy 0.987 today -> start at the paired sell 0.998
+  reset({ bid1: 0.99, ask1: 0.991, orders: [], deals: [] }, { side: "buy", price: 0.987, qty: 5000, date: "20260928", time: "133925" });
+  out = await cruise.enableCruise("u", "159781.SZ", 5000);
+  assert.ok(out.ok, out.error);
+  assert.strictEqual(prices("sell")[0], "0.998");
+  assert.strictEqual(prices("buy")[0], "0.986");
+  console.log("11 last buy ok:", out.note);
+
+  // 12. anchor below ask -> lifted to ask
+  reset({ bid1: 0.994, ask1: 0.995, orders: [], deals: [] }, { side: "sell", price: 0.99, qty: 5000, date: "20260928", time: "100000" });
+  out = await cruise.enableCruise("u", "159781.SZ", 5000);
+  assert.ok(out.ok, out.error);
+  assert.strictEqual(prices("sell")[0], "0.995");
+  assert.ok(out.note.includes("改从卖一开始"), out.note);
+  console.log("12 lifted ok:", out.note);
+
+  // 13. no sell hang and no last deal -> refused
+  reset({ bid1: 0.994, ask1: 0.995, orders: [], deals: [] }, null);
+  out = await cruise.enableCruise("u", "159781.SZ", 5000);
+  assert.ok(!out.ok && out.error.includes("找不到当天或上一交易日的成交"), out.error);
+  assert.strictEqual(s.placed.length, 0);
+  console.log("13 no deal refused:", out.error);
+
+  // 14. with a sell hang the old rule is unchanged: spread violation is refused, nothing cancelled
+  reset({ bid1: 0.994, ask1: 0.995, orders: [order("sell", 1.0, 5000, 50, "S1"), order("buy", 0.994, 5000, 50, "B1")], deals: [] },
+    { side: "sell", price: 1.001, qty: 5000, date: "20260928", time: "100000" });
+  out = await cruise.enableCruise("u", "159781.SZ", 5000);
+  assert.ok(!out.ok && out.error.includes("价差"), out.error);
+  assert.strictEqual((s.cancels || []).length, 0);
+  console.log("14 sell present unchanged:", out.error);
+
+  const { pickLastDeal } = require("../server/deals");
+  const picked = pickLastDeal([deal("buy", 0.987, 5000, "X1", 1, "133855"), deal("sell", 0.997, 2800, "X2", 2, "141033"), deal("buy", 1.037, 5000, "X3", 3, "92500")]);
+  assert.strictEqual(picked.tradeId, "X2", "latest by time, 92500 is 09:25");
+  console.log("15 pickLastDeal ok:", picked.side, picked.price, picked.time);
 
   console.log("\nlast engine logs:\n  " + s.logs.slice(-6).join("\n  "));
   console.log("\nALL PASSED");

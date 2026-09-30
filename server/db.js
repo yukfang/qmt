@@ -1,4 +1,5 @@
 const fs = require("fs");
+const { pickLastDeal } = require("./deals");
 const path = require("path");
 const mysql = require("mysql2/promise");
 
@@ -188,6 +189,62 @@ async function ensureSchema() {
   await ensureColumn("user_cruise", "lease_until", "DATETIME(3) NULL");
   await ensureColumn("user_cruise", "hang_qty", "INT NULL");
   await ensureCruiseChannelWidth();
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS stock_last_deal (
+      stock VARCHAR(16) NOT NULL PRIMARY KEY,
+      side VARCHAR(4) NOT NULL,
+      price DECIMAL(12,3) NOT NULL,
+      qty INT NOT NULL,
+      trade_date CHAR(8) NOT NULL,
+      trade_time CHAR(6) NOT NULL DEFAULT '',
+      trade_id VARCHAR(64) NOT NULL DEFAULT '',
+      order_id VARCHAR(64) NOT NULL DEFAULT '',
+      rank_no BIGINT NOT NULL,
+      updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+    )
+  `);
+}
+
+// QMT only reports today's deals, so the latest deal is kept here; after a quiet day the row
+// still holds the previous trading day's last deal. Only a later-ranked deal overwrites it.
+async function rememberLastDeal(stock, deals) {
+  const last = pickLastDeal(deals);
+  if (!last) return;
+  const db = getPool();
+  await db.query(
+    `INSERT INTO stock_last_deal (stock, side, price, qty, trade_date, trade_time, trade_id, order_id, rank_no)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       side = IF(VALUES(rank_no) > rank_no, VALUES(side), side),
+       price = IF(VALUES(rank_no) > rank_no, VALUES(price), price),
+       qty = IF(VALUES(rank_no) > rank_no, VALUES(qty), qty),
+       trade_date = IF(VALUES(rank_no) > rank_no, VALUES(trade_date), trade_date),
+       trade_time = IF(VALUES(rank_no) > rank_no, VALUES(trade_time), trade_time),
+       trade_id = IF(VALUES(rank_no) > rank_no, VALUES(trade_id), trade_id),
+       order_id = IF(VALUES(rank_no) > rank_no, VALUES(order_id), order_id),
+       rank_no = GREATEST(rank_no, VALUES(rank_no))`,
+    [stock, last.side, last.price, last.qty, last.date, last.time, last.tradeId.slice(0, 64), last.orderId.slice(0, 64), last.rank]
+  );
+}
+
+async function getLastDeal(stock) {
+  const db = getPool();
+  const [rows] = await db.query(
+    `SELECT side, price, qty, trade_date, trade_time, trade_id, order_id, rank_no FROM stock_last_deal WHERE stock = ?`,
+    [normalizeStockCode(stock)]
+  );
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    side: row.side,
+    price: Number(row.price),
+    qty: Number(row.qty),
+    date: String(row.trade_date),
+    time: String(row.trade_time || ""),
+    tradeId: String(row.trade_id || ""),
+    orderId: String(row.order_id || ""),
+    rank: Number(row.rank_no) || 0,
+  };
 }
 
 async function ensureColumn(table, column, def) {
@@ -274,6 +331,9 @@ async function saveSnapshot(payload) {
        content_hash = VALUES(content_hash)`,
     [account, stock, json, hash, nextVersion]
   );
+  if (String(payload.source || "") !== "sim" && account !== "SIM") {
+    await rememberLastDeal(stock, payload.deals).catch((err) => console.error("rememberLastDeal failed:", err.message));
+  }
   const [rows] = await db.query(
     `SELECT updated_at, UNIX_TIMESTAMP(updated_at) AS updated_at_unix, version
      FROM sync_snapshot WHERE account = ? AND stock = ?`,
@@ -365,6 +425,15 @@ async function getSnapshot(since = 0, stock = "") {
   const pendingHangs = await listHangRequests({ stock: rowStock });
   const pendingCancels = await listCancelRequests({ stock: rowStock });
   const failedHangs = await listFailedHangs({ stock: rowStock });
+  const payload = parsePayload(row.payload) || {};
+  let lastDeal = await getLastDeal(rowStock);
+  if (String(payload.source || "") !== "sim" && row.account !== "SIM") {
+    const fresh = pickLastDeal(payload.deals);
+    if (fresh && (!lastDeal || fresh.rank > lastDeal.rank)) {
+      lastDeal = fresh;
+      await rememberLastDeal(rowStock, payload.deals).catch((err) => console.error("rememberLastDeal failed:", err.message));
+    }
+  }
   if (since > 0 && version > 0 && since >= version) {
     return {
       unchanged: true,
@@ -374,9 +443,9 @@ async function getSnapshot(since = 0, stock = "") {
       pendingHangs,
       pendingCancels,
       failedHangs,
+      lastDeal,
     };
   }
-  const payload = parsePayload(row.payload) || {};
   const updatedAt = toEpochMs(row.updated_at_unix, row.updated_at);
   return {
     unchanged: false,
@@ -391,6 +460,7 @@ async function getSnapshot(since = 0, stock = "") {
     pendingHangs,
     pendingCancels,
     failedHangs,
+    lastDeal,
   };
 }
 
@@ -1064,6 +1134,8 @@ module.exports = {
   setCruiseState,
   saveCruiseRungs,
   listActiveCruises,
+  getLastDeal,
+  rememberLastDeal,
   saveCruiseBookIfOn,
   normalizeStockCode,
   renewCruiseLease,

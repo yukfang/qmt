@@ -28,8 +28,8 @@ const STOCKS = [
     id: "516310.SH",
     label: "516310",
     name: "银行ETF",
-    buyStep: 0.005,
-    sellStep: 0.005,
+    buyStep: 0.001,
+    sellStep: 0.001,
     reverseGap: 0.006,
     minSpread: 0.006,
     levels: 10,
@@ -364,6 +364,10 @@ function buildLevels(data, tick) {
     );
   }
 
+  const last = data.lastDeal && num(data.lastDeal.price) > 0 ? data.lastDeal : null;
+  const lastIdx = last ? priceToIdx(last.price, tick) : null;
+  if (lastIdx != null) idxs.push(lastIdx);
+
   if (num(data.bid1) > 0) idxs.push(priceToIdx(data.bid1, tick));
   if (num(data.ask1) > 0) idxs.push(priceToIdx(data.ask1, tick));
 
@@ -399,13 +403,51 @@ function buildLevels(data, tick) {
       fillSell: fills.sell.get(idx) || [],
       cancelBuy: cancels.buy.get(idx) || 0,
       cancelSell: cancels.sell.get(idx) || 0,
+      lastDeal: idx === lastIdx ? last : null,
     });
   }
   return levels;
 }
 
+function shanghaiDateDigits() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(new Date()).replace(/\D/g, "");
+}
+
+function lastDealWhen(deal) {
+  const d = String((deal && deal.date) || "");
+  const t = String((deal && deal.time) || "");
+  const hm = t.length >= 4 ? `${t.slice(0, 2)}:${t.slice(2, 4)}` : "";
+  if (d === shanghaiDateDigits()) return hm || "今天";
+  const day = d.length >= 8 ? `${d.slice(4, 6)}-${d.slice(6, 8)}` : d;
+  return hm ? `${day} ${hm}` : day;
+}
+
+function lastDealText(deal) {
+  if (!deal) return "";
+  const verb = deal.side === "sell" ? "卖" : "买";
+  return `最后成交 ${verb} ${num(deal.price).toFixed(3)} × ${fmtQty(num(deal.qty))} ${lastDealWhen(deal)}`;
+}
+
+function lastDealSide(row) {
+  if (!row.lastDeal) return "";
+  return row.lastDeal.side === "sell" ? "sell" : "buy";
+}
+
+function lastDealOnPrice(row) {
+  const side = lastDealSide(row);
+  if (!side) return false;
+  return !(side === "sell" ? row.fillSell : row.fillBuy).length;
+}
+
+function priceClass(row) {
+  return `price${lastDealOnPrice(row) ? " last-mark" : ""}`;
+}
+
 function rowEmpty(row) {
   return (
+    !row.lastDeal &&
     !row.hangBuy.length &&
     !row.hangSell.length &&
     !row.fillBuy.length &&
@@ -424,7 +466,12 @@ function rowKey(row) {
     itemsKey(row.fillSell),
     row.cancelBuy,
     row.cancelSell,
+    row.lastDeal ? `${row.lastDeal.side}:${row.lastDeal.qty}:${row.lastDeal.date}:${row.lastDeal.time}` : "",
   ].join("|");
+}
+
+function rowClass(row) {
+  return `ladder-row${rowEmpty(row) ? " empty" : ""}${row.lastDeal ? " last-deal" : ""}`;
 }
 
 function ladderFingerprint(levels, tick, data) {
@@ -448,7 +495,7 @@ function hangTagHtml(item) {
   return `<span class="tag hang ${sell ? "sell" : "buy"}${extra}" data-order-id="${oid}" data-side="${sell ? "sell" : "buy"}" data-qty="${num(item.qty)}">${label} ${fmtQty(item.qty)}${suffix}</span>`;
 }
 
-function fillTagHtml(items, side) {
+function fillTagHtml(items, side, lastDeal) {
   if (!items.length) return "";
   const qtys = items.map((it) => num(it.qty));
   const n = qtys.length;
@@ -458,6 +505,9 @@ function fillTagHtml(items, side) {
   const unit = n > 1 && same ? qtys[0] : total;
   const full = n > 1 && same ? `${label} ${fmtQty(unit)} x ${n}` : `${label} ${fmtQty(unit)}`;
   const compact = n > 1 && same ? `${fmtQtyCompact(unit)} x ${n}` : fmtQtyCompact(unit);
+  if (lastDeal) {
+    return `<span class="tag fill ${side} last-mark" title="${full} · ${lastDealText(lastDeal)}">${dualTagText(full, compact)}</span>`;
+  }
   return `<span class="tag fill ${side}" title="${full}">${dualTagText(full, compact)}</span>`;
 }
 
@@ -465,10 +515,11 @@ function tagsHtml(row) {
   const hangs = [];
   const fills = [];
   const cancels = [];
+  const lastSide = lastDealSide(row);
   for (const item of row.hangBuy) hangs.push(hangTagHtml(item));
   for (const item of row.hangSell) hangs.push(hangTagHtml(item));
-  fills.push(fillTagHtml(row.fillBuy, "buy"));
-  fills.push(fillTagHtml(row.fillSell, "sell"));
+  fills.push(fillTagHtml(row.fillBuy, "buy", lastSide === "buy" ? row.lastDeal : null));
+  fills.push(fillTagHtml(row.fillSell, "sell", lastSide === "sell" ? row.lastDeal : null));
   if (row.cancelBuy) cancels.push(`<span class="tag cancel">买撤 ${fmtQty(row.cancelBuy)}</span>`);
   if (row.cancelSell) cancels.push(`<span class="tag cancel">卖撤 ${fmtQty(row.cancelSell)}</span>`);
   return { hangs: hangs.join(""), fills: fills.join(""), cancels: cancels.join("") };
@@ -477,11 +528,11 @@ function tagsHtml(row) {
 function createRowEl(row) {
   const tags = tagsHtml(row);
   const el = document.createElement("div");
-  el.className = `ladder-row${rowEmpty(row) ? " empty" : ""}`;
+  el.className = rowClass(row);
   el.dataset.idx = String(row.idx);
   el.dataset.key = rowKey(row);
   el.innerHTML = `
-    <div class="price">${row.priceLabel}</div>
+    <div class="${priceClass(row)}"${lastDealOnPrice(row) ? ` title="${lastDealText(row.lastDeal)}"` : ""}>${row.priceLabel}</div>
     <div class="cells hangs">${tags.hangs}</div>
     <div class="cells fills">${tags.fills}</div>
     <div class="cells cancels">${tags.cancels}</div>`;
@@ -492,13 +543,19 @@ function patchRowEl(el, row) {
   const key = rowKey(row);
   if (el.dataset.key === key) return false;
   const tags = tagsHtml(row);
-  el.className = `ladder-row${rowEmpty(row) ? " empty" : ""}`;
+  el.className = rowClass(row);
   el.dataset.key = key;
   const price = el.querySelector(".price");
   const hangs = el.querySelector(".hangs");
   const fills = el.querySelector(".fills");
   const cancels = el.querySelector(".cancels");
-  if (price && price.textContent !== row.priceLabel) price.textContent = row.priceLabel;
+  if (price) {
+    if (price.textContent !== row.priceLabel) price.textContent = row.priceLabel;
+    const pc = priceClass(row);
+    if (price.className !== pc) price.className = pc;
+    if (lastDealOnPrice(row)) price.title = lastDealText(row.lastDeal);
+    else price.removeAttribute("title");
+  }
   if (hangs && hangs.innerHTML !== tags.hangs) hangs.innerHTML = tags.hangs;
   if (fills && fills.innerHTML !== tags.fills) fills.innerHTML = tags.fills;
   if (cancels && cancels.innerHTML !== tags.cancels) cancels.innerHTML = tags.cancels;
@@ -1631,6 +1688,7 @@ async function setCruise(on) {
     const data = await res.json().catch(() => ({}));
     if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
     applyCruiseFromServer(data, stock);
+    if (data.note) pushAlert(`${stockProfile(stock).label} ${data.note}`);
     if (on && data.engine === false) {
       pushAlert("服务器巡航引擎未启动（本地服务默认关闭），巡航开关已保存但不会自动挂单");
     }
@@ -1694,7 +1752,9 @@ async function refresh(expectedEpoch) {
       if (ns.data && (Array.isArray(data.pendingHangs) || Array.isArray(data.pendingCancels))) {
         if (Array.isArray(data.pendingHangs)) ns.data.pendingHangs = data.pendingHangs;
         if (Array.isArray(data.pendingCancels)) ns.data.pendingCancels = data.pendingCancels;
+        if ("lastDeal" in data) ns.data.lastDeal = data.lastDeal;
         renderLadder(buildLevels(ns.data, tick), tick, ns.data);
+        paintStateMeta(ns.data, stock);
       }
       pollCruiseAlerts().catch(() => {});
       return;
@@ -1784,7 +1844,8 @@ function paintStateMeta(data, stock) {
     else buyFills += 1;
   }
   if (data && data.updatedAt != null) setLatestSync(data.updatedAt);
-  setMeta(`${stockProfile(id).label}  挂盘${open} 委托${orders} 买成${buyFills} 卖成${sellFills}`);
+  const last = data && data.lastDeal ? `  ${lastDealText(data.lastDeal)}` : "";
+  setMeta(`${stockProfile(id).label}  挂盘${open} 委托${orders} 买成${buyFills} 卖成${sellFills}${last}`);
 }
 
 async function switchStock(id) {

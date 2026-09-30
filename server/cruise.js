@@ -13,7 +13,7 @@ const HOLDER = `srv:${os.hostname()}:${process.pid}`.slice(0, 64);
 
 const PROFILES = {
   "159781.SZ": { id: "159781.SZ", label: "159781", buyStep: 0.001, sellStep: 0.001, reverseGap: 0.011, minSpread: 0.012, levels: 10, qtyDefault: 10000 },
-  "516310.SH": { id: "516310.SH", label: "516310", buyStep: 0.005, sellStep: 0.005, reverseGap: 0.006, minSpread: 0.006, levels: 10, qtyDefault: 10000 },
+  "516310.SH": { id: "516310.SH", label: "516310", buyStep: 0.001, sellStep: 0.001, reverseGap: 0.006, minSpread: 0.006, levels: 10, qtyDefault: 10000 },
 };
 
 function profileOf(stock) {
@@ -145,10 +145,16 @@ function cruiseAnchorIdx(data, maps, profile) {
   return { buy, sell, buyCruise, sellCruise };
 }
 
-function cruiseFillPlans(ctx, sides) {
+function cruiseFillPlans(ctx, sides, sellStart) {
   const { data, profile, qty } = ctx;
   const maps = hangMapsWithPending(data);
-  const { buy, sell, buyCruise, sellCruise } = cruiseAnchorIdx(data, maps, profile);
+  let { buy, sell, buyCruise, sellCruise } = cruiseAnchorIdx(data, maps, profile);
+  if (sellStart > 0) {
+    const bidIdx = num(data.bid1) > 0 ? priceToIdx(data.bid1) : 0;
+    sellCruise = sellStart;
+    buyCruise = sellStart - Math.round(profile.minSpread * SCALE);
+    if (bidIdx > 0) buyCruise = Math.min(buyCruise, bidIdx);
+  }
   const want = new Set(sides || ["buy", "sell"]);
   const plans = [];
   function addSide(side, startIdx, dir, have) {
@@ -649,18 +655,87 @@ async function tickOne({ username, stock, qty }) {
   if (bookSignature(book) !== sigBefore) await db.saveCruiseBookIfOn(username, stock, book);
 }
 
+function fmtDealWhen(deal) {
+  const d = String(deal.date || "");
+  const t = String(deal.time || "");
+  const day = d.length >= 8 ? `${d.slice(4, 6)}-${d.slice(6, 8)}` : d;
+  return t.length >= 4 ? `${day} ${t.slice(0, 2)}:${t.slice(2, 4)}` : day;
+}
+
+// No sell hang to anchor on: start from the last deal (today or the previous trading day).
+// Sell fill -> one sell step above it; buy fill -> the sell that buy pairs with (+reverseGap).
+// Live buys above anchor - minSpread would break the spread rule, so they are cancelled.
+function planFromLastDeal(ctx) {
+  const { data, profile } = ctx;
+  const deal = data.lastDeal;
+  if (!deal || !(num(deal.price) > 0) || (deal.side !== "buy" && deal.side !== "sell")) {
+    return { error: "没有卖挂，且找不到当天或上一交易日的成交，无法确定巡航点，禁止巡航" };
+  }
+  const step = deal.side === "sell" ? profile.sellStep : profile.reverseGap;
+  let sellStart = priceToIdx(roundTickPx(num(deal.price) + step));
+  const askIdx = num(data.ask1) > 0 ? priceToIdx(data.ask1) : 0;
+  const lifted = askIdx > 0 && sellStart < askIdx;
+  if (lifted) sellStart = askIdx;
+  const bidIdx = num(data.bid1) > 0 ? priceToIdx(data.bid1) : 0;
+  let buyTop = sellStart - Math.round(profile.minSpread * SCALE);
+  if (bidIdx > 0) buyTop = Math.min(buyTop, bidIdx);
+  const cancels = [];
+  for (const row of orderRows(data)) {
+    if (optSide(row) !== "buy") continue;
+    const remaining = num(row.m_nVolumeTotal);
+    if (!OPEN_STATUS.has(statusCode(row)) || !(remaining > 0)) continue;
+    if (priceToIdx(orderPrice(row)) <= buyTop) continue;
+    const orderId = orderRowId(row);
+    if (orderId) cancels.push({ orderId, price: roundTickPx(orderPrice(row)), qty: remaining });
+  }
+  const verb = deal.side === "sell" ? "卖成" : "买成";
+  const note = `无卖挂，按最后一笔${verb} ${num(deal.price).toFixed(3)}（${fmtDealWhen(deal)}）从 ${idxToPrice(sellStart).toFixed(3)} 开启巡航`
+    + (lifted ? "（起点低于卖一，改从卖一开始）" : "")
+    + (cancels.length ? `，撤销 ${cancels.length} 笔高于 ${idxToPrice(buyTop).toFixed(3)} 的买挂` : "");
+  return { sellStart, cancels, note };
+}
+
 // Enable: validate against the latest snapshot, fill both ladders, then switch cruise on.
 async function enableCruise(username, stock, qty) {
   const code = db.normalizeStockCode(stock);
   const profile = profileOf(code);
   if (!profile) return { ok: false, error: `不支持巡航的股票：${stock}` };
   const data = await db.getSnapshot(0, code);
+  const hasSell = liveHangQtyMaps(data).sell.size > 0;
   const reason = cruiseEnableError(data, profile);
-  if (reason) return { ok: false, error: reason };
+  if (reason && (hasSell || !reason.startsWith("没有卖挂"))) return { ok: false, error: reason };
   const lease = await db.renewCruiseLease(username, "live", code, HOLDER);
   if (!lease.held && lease.reason === "busy") return { ok: false, error: "巡航正由另一个服务器实例执行，请稍后再试" };
   const ctx = makeCtx({ username, stock: code, data, state: { qty }, qty });
-  for (const plan of cruiseFillPlans(ctx)) {
+
+  let sellStart = 0;
+  let note = "";
+  const dropped = [];
+  if (!hasSell) {
+    const start = planFromLastDeal(ctx);
+    if (start.error) return { ok: false, error: start.error };
+    sellStart = start.sellStart;
+    note = start.note;
+    for (const c of start.cancels) {
+      try {
+        await db.createCancelOrder({
+          account: data.account, stock: code, side: "buy", price: c.price, qty: c.qty, targetOrderId: c.orderId, source: "cruise",
+        });
+        dropped.push(c.orderId);
+        ctx.info(`开启巡航撤销买挂 ${c.price.toFixed(3)} × ${c.qty} 委托 ${c.orderId}`);
+      } catch (err) {
+        const error = `巡航撤销买挂失败：${c.price.toFixed(3)} × ${c.qty}：${err.message}`;
+        ctx.fail(error);
+        return { ok: false, error };
+      }
+    }
+    // Cancelled buys still show as open until QMT executes the cancel; leave them out of the fill.
+    const skip = new Set(dropped);
+    data.orders = (data.orders || []).filter((row) => !skip.has(orderRowId(row)));
+    data.openOrders = (data.openOrders || []).filter((row) => !skip.has(orderRowId(row)));
+  }
+
+  for (const plan of cruiseFillPlans(ctx, null, sellStart)) {
     const label = plan.side === "sell" ? "卖挂" : "买挂";
     try {
       await placePlan(ctx, plan, "开启巡航补齐");
@@ -671,9 +746,18 @@ async function enableCruise(username, stock, qty) {
     }
   }
   const state = await db.setCruiseState(username, "live", true, code, ctx.qty);
+  if (dropped.length) {
+    await db.saveCruiseBookIfOn(username, code, {
+      rungs: [],
+      dropped: [...new Set([...(state.dropped || []), ...dropped])],
+      lastDeal: state.lastDeal,
+      prevDeal: state.prevDeal,
+    });
+  }
   await db.renewCruiseLease(username, "live", code, HOLDER);
+  if (note) ctx.alert(note);
   ctx.info(`开启巡航 数量 ${ctx.qty}`);
-  return { ok: true, state };
+  return { ok: true, state: { ...state, dropped: [...new Set([...(state.dropped || []), ...dropped])] }, note };
 }
 
 async function disableCruise(username, stock) {

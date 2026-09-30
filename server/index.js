@@ -505,7 +505,7 @@ app.post(
       sendFail(req, res, 400, "CRUISE_ENABLE_REJECTED", out.error);
       return;
     }
-    res.json({ ok: true, engine: cruiseEngineOn, ...out.state });
+    res.json({ ok: true, engine: cruiseEngineOn, ...out.state, note: out.note || "" });
   })
 );
 

@@ -822,6 +822,43 @@ body.cruise-on .ladder-section {
   color: #9f1219;
 }
 
+.tag.last-mark,
+.ladder-row .price.last-mark {
+  position: relative;
+}
+
+.tag.last-mark::after,
+.ladder-row .price.last-mark::after {
+  content: "★";
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #ff9f0a;
+  color: #fff;
+  font-size: 8px;
+  line-height: 13px;
+  text-align: center;
+  font-weight: 700;
+  box-shadow: 0 0 0 1.5px #fff;
+  pointer-events: none;
+}
+
+.ladder-row .price.last-mark::after {
+  top: 1px;
+  right: 4px;
+}
+
+.ladder-row.last-deal {
+  background: linear-gradient(90deg, rgba(255, 204, 0, 0.16), rgba(255, 204, 0, 0) 60%);
+}
+
+.ladder-row.last-deal .price {
+  font-weight: 800;
+}
+
 .chip.quote-bid {
   background: var(--green-soft);
   color: var(--green);
