@@ -418,11 +418,41 @@ app.post(
   })
 );
 
+// Only one QMT executor may place orders at a time; it renews this lease every round.
+const EXECUTOR_LEASE = "qmt_order_exec";
+const EXECUTOR_LEASE_SEC = 15;
+
+app.post(
+  "/api/commands/lease",
+  checkToken,
+  asyncHandler(async (req, res) => {
+    const holder = String((req.body && req.body.holder) || "").trim();
+    if (!holder) {
+      sendFail(req, res, 400, "LEASE_HOLDER_MISSING", "缺少 holder");
+      return;
+    }
+    const out = await db.acquireLease(EXECUTOR_LEASE, holder, EXECUTOR_LEASE_SEC);
+    res.json({ ok: true, held: out.held, holder: out.holder, ttlSec: EXECUTOR_LEASE_SEC });
+  })
+);
+
 app.post(
   "/api/commands/:id/claim",
   checkToken,
   asyncHandler(async (req, res) => {
     const id = Number(req.params.id);
+    const holder = String((req.body && req.body.holder) || "").trim();
+    let lease;
+    if (holder) {
+      lease = await db.acquireLease(EXECUTOR_LEASE, holder, EXECUTOR_LEASE_SEC);
+    } else {
+      const active = await db.activeLeaseHolder(EXECUTOR_LEASE);
+      lease = { held: !active, holder: active };
+    }
+    if (!lease.held) {
+      sendFail(req, res, 409, "EXECUTOR_BUSY", `另一个执行器正在运行（${lease.holder}），本实例不能领取指令`);
+      return;
+    }
     const row = await db.claimHangOrder(id);
     if (!row) {
       const cur = await db.getHangOrder(id);

@@ -24,7 +24,7 @@ function makeFakeDb() {
       return short === "516310" ? "516310.SH" : "159781.SZ";
     },
     async getSnapshot() {
-      return { ...state.snapshot, pendingHangs: state.pending.slice(), orders: state.snapshot.orders.slice() };
+      return { ...state.snapshot, pendingHangs: state.pending.slice(), landingHangs: (state.landing || []).slice(), orders: state.snapshot.orders.slice() };
     },
     async getCruiseState() {
       return { ...state.cruise, seenDeals: [...state.seen].filter((k) => k.startsWith("deal|")).map((k) => k.slice(5)), seenFails: [] };
@@ -251,6 +251,29 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   const picked = pickLastDeal([deal("buy", 0.987, 5000, "X1", 1, "133855"), deal("sell", 0.997, 2800, "X2", 2, "141033"), deal("buy", 1.037, 5000, "X3", 3, "92500")]);
   assert.strictEqual(picked.tradeId, "X2", "latest by time, 92500 is 09:25");
   console.log("15 pickLastDeal ok:", picked.side, picked.price, picked.time);
+
+  // 16. 09-30 13:13: buy 0.979 fills, reverse sell 0.990 is placed by QMT ('done') but the next
+  // status push does not list it yet. The ladder must not re-anchor on 0.991 and re-buy 0.979.
+  const ladderBuys = [0.978, 0.977, 0.976, 0.975, 0.974, 0.973, 0.972, 0.971, 0.97].map((p, i) => order("buy", p, 5000, 50, `LB${i}`));
+  const ladderSells = [0.991, 0.992, 0.993, 0.994, 0.995, 0.996, 0.997, 0.998, 0.999, 1.0].map((p, i) => order("sell", p, 5000, 50, `LS${i}`));
+  reset({ bid1: 0.979, ask1: 0.98, orders: [order("buy", 0.979, 0, 56, "B979"), ...ladderBuys, ...ladderSells], deals: [] }, null);
+  s.cruise.on = true;
+  s.cruise.qty = 5000;
+  s.snapshot.deals = [deal("buy", 0.979, 5000, "D979", "B979", "131259")];
+  s.snapshot.deals[0].m_strTradeDate = "20260930";
+  await cruise.tickAll();
+  assert.ok(s.placed.some((o) => o.side === "sell" && o.price === 0.99), summary(s.placed));
+  assert.ok(!s.placed.some((o) => o.side === "buy" && o.price === 0.979), `pending reverse keeps the anchor: ${summary(s.placed)}`);
+  s.landing = s.pending.map((p) => ({ ...p, status: "landing" }));
+  s.pending = [];
+  s.placed = [];
+  await cruise.tickAll();
+  assert.ok(!s.placed.some((o) => o.side === "buy" && o.price === 0.979), `landing reverse keeps the anchor: ${summary(s.placed)}`);
+  s.landing = [];
+  await cruise.tickAll();
+  assert.ok(s.placed.some((o) => o.side === "buy" && o.price === 0.979), "without it the old bug re-buys 0.979");
+  s.landing = [];
+  console.log("16 landing reverse ok: no re-buy at 0.979 while the 0.990 sell is in flight");
 
   console.log("\nlast engine logs:\n  " + s.logs.slice(-6).join("\n  "));
   console.log("\nALL PASSED");

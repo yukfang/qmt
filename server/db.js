@@ -203,6 +203,42 @@ async function ensureSchema() {
       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
     )
   `);
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS service_lease (
+      name VARCHAR(64) NOT NULL PRIMARY KEY,
+      holder VARCHAR(64) NOT NULL,
+      lease_until DATETIME(3) NOT NULL,
+      updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
+    )
+  `);
+}
+
+// Single-owner lease (e.g. the QMT order executor). The holder column is assigned first, so the
+// lease_until assignment below already sees the new owner (MySQL applies SET left to right).
+async function acquireLease(name, holder, ttlSec) {
+  const id = String(holder || "").trim().slice(0, 64);
+  if (!id) return { held: false, holder: "" };
+  const ttl = Math.max(1, Math.min(300, Number(ttlSec) || 15));
+  const db = getPool();
+  await db.query(
+    `INSERT INTO service_lease (name, holder, lease_until)
+     VALUES (?, ?, NOW(3) + INTERVAL ? SECOND)
+     ON DUPLICATE KEY UPDATE
+       holder = IF(holder = VALUES(holder) OR lease_until < NOW(3), VALUES(holder), holder),
+       lease_until = IF(holder = VALUES(holder), VALUES(lease_until), lease_until)`,
+    [name, id, ttl]
+  );
+  const cur = await activeLeaseHolder(name);
+  return { held: cur === id, holder: cur };
+}
+
+async function activeLeaseHolder(name) {
+  const db = getPool();
+  const [rows] = await db.query(
+    `SELECT holder FROM service_lease WHERE name = ? AND lease_until >= NOW(3)`,
+    [name]
+  );
+  return rows[0] ? String(rows[0].holder) : "";
 }
 
 // QMT only reports today's deals, so the latest deal is kept here; after a quiet day the row
@@ -447,6 +483,7 @@ async function getSnapshot(since = 0, stock = "") {
     };
   }
   const updatedAt = toEpochMs(row.updated_at_unix, row.updated_at);
+  const orders = payload.orders || [];
   return {
     unchanged: false,
     version,
@@ -455,9 +492,10 @@ async function getSnapshot(since = 0, stock = "") {
     account: payload.account || row.account,
     stock: normalizeStockCode(payload.stock || row.stock || want),
     openOrders: payload.openOrders || [],
-    orders: payload.orders || [],
+    orders,
     deals: payload.deals || [],
     pendingHangs,
+    landingHangs: await listLandingHangs(rowStock, orders),
     pendingCancels,
     failedHangs,
     lastDeal,
@@ -663,7 +701,10 @@ async function insertCruiseHang({ db, account, stock, side, price, qty, coverQty
            AND ROUND(price, 3) = ?`,
         [code, short, side, price]
       );
-      const have = snapshotOpenQty(snapshot, side, price) + Number(pendRows[0] && pendRows[0].qty);
+      const landing = (snapshot.landingHangs || [])
+        .filter((row) => row.side === side && roundPrice(row.price) === price)
+        .reduce((sum, row) => sum + Number(row.qty || 0), 0);
+      const have = snapshotOpenQty(snapshot, side, price) + Number(pendRows[0] && pendRows[0].qty) + landing;
       const room = Math.floor((coverQty - have) / 100) * 100;
       if (!(room > 0)) return { covered: true };
       const placeQty = Math.min(qty, room);
@@ -712,6 +753,64 @@ function mapPendingRow(row) {
     targetOrderId: target,
     createdAt: row.created_at instanceof Date ? row.created_at.getTime() : row.created_at,
   };
+}
+
+// A hang QMT already placed ('done') stays invisible until the next status push lists it in
+// snapshot.orders. Until a matching order (same side/price, inserted no earlier than the
+// request) shows up, it is still reported so nothing re-fills that slot or re-anchors around it.
+const LANDING_WINDOW_SEC = 120;
+
+const shanghaiStamp = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hourCycle: "h23",
+});
+
+function orderInsertStamp(row) {
+  const d = String(row.m_strInsertDate || row.date || "").replace(/\D/g, "");
+  const t = String(row.m_strInsertTime || row.time || "").replace(/\D/g, "");
+  if (d.length < 8 || t.length < 5) return "";
+  return d.slice(0, 8) + t.padStart(6, "0").slice(0, 6);
+}
+
+async function listLandingHangs(stock, orders, windowSec = LANDING_WINDOW_SEC) {
+  const db = getPool();
+  const { code, short } = stockCodeVariants(stock);
+  const [rows] = await db.query(
+    `SELECT id, account, stock, side, price, qty, status, action, target_order_id, created_at,
+            UNIX_TIMESTAMP(created_at) AS created_unix
+     FROM pending_orders
+     WHERE status = 'done'
+       AND (action = 'hang' OR action IS NULL OR action = '')
+       AND stock NOT LIKE '%|C|%'
+       AND (stock = ? OR stock = ?)
+       AND finished_at >= NOW(3) - INTERVAL ? SECOND
+     ORDER BY id ASC`,
+    [code, short, windowSec]
+  );
+  if (!rows.length) return [];
+  const pool = [];
+  for (const row of orders || []) {
+    const name = String(row.m_strOptName || row.side || "");
+    const side = name.includes("卖") ? "sell" : name.includes("买") ? "buy" : "";
+    const stamp = orderInsertStamp(row);
+    if (side && stamp) pool.push({ side, price: roundPrice(row.m_dLimitPrice || row.price), stamp, used: false });
+  }
+  const out = [];
+  for (const row of rows) {
+    const side = String(row.side || "").toLowerCase();
+    const price = roundPrice(row.price);
+    const since = shanghaiStamp.format(new Date((Number(row.created_unix) - 1) * 1000)).replace(/\D/g, "");
+    const hit = pool.find((o) => !o.used && o.side === side && o.price === price && o.stamp >= since);
+    if (hit) hit.used = true;
+    else out.push({ ...mapPendingRow(row), status: "landing" });
+  }
+  return out;
 }
 
 async function listHangRequests({ stock = "" } = {}) {
@@ -1136,6 +1235,9 @@ module.exports = {
   listActiveCruises,
   getLastDeal,
   rememberLastDeal,
+  listLandingHangs,
+  acquireLease,
+  activeLeaseHolder,
   saveCruiseBookIfOn,
   normalizeStockCode,
   renewCruiseLease,

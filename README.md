@@ -118,7 +118,7 @@ node tools/logs.js -q claim -f      # 关键字 + 持续跟踪
 - `strategies/tick_push_once.py`：tick 快照 POST httpcan（已验证）
 - `strategies/account_orders_deals.py`：实盘打印挂盘/成交明细（已验证）
 - `strategies/rmt_order_status.py` / `local_order_status.py`：持续推 sync + 日志到 Web
-- `strategies/rmt_order_exec.py` / `local_order_exec.py`：拉取 pending 挂单/撤单并实盘执行
+- `strategies/rmt_order_exec.py` / `local_order_exec.py`：拉取 pending 挂单/撤单并实盘执行。单实例串行：每轮先抢服务器执行器租约（`POST /api/commands/lease`，15 秒），再拉取 → 领取 → 下单/撤单 → 回报；一轮结束至少等 `ROUND_GAP_SEC`（1 秒）才开始下一轮。租约被别的实例持有时本实例空转，领取指令也会被服务器拒绝（`EXECUTOR_BUSY`）
 - `strategies/test_rmt_strategy.py`：远程策略加载器；`strategies/registry.json`：下发清单
 - `server/`：Express；写入/读取 MySQL
 - `server/schema.sql`：表结构

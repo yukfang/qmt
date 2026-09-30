@@ -103,7 +103,7 @@ function liveHangQtyMaps(data) {
 
 function hangMapsWithPending(data) {
   const { buy, sell } = liveHangQtyMaps(data);
-  for (const row of pendingHangRequests(data)) {
+  for (const row of [...pendingHangRequests(data), ...((data && data.landingHangs) || [])]) {
     const idx = priceToIdx(num(row.price));
     const map = row.side === "sell" ? sell : buy;
     map.set(idx, (map.get(idx) || 0) + num(row.qty));
