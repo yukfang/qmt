@@ -5,8 +5,7 @@
 必须「交易」里实盘启动，不要回测。
 与 rmt_order_status.py 可同时运行：订单状态推送与订单执行并行，互不干扰。
 
-每一轮（单实例、串行，一轮做完才开始下一轮）：
-  POST /api/commands/lease      抢/续执行器租约；别的实例持有则本轮跳过
+每一轮（串行，一轮做完才开始下一轮）：
   GET  /api/commands
   POST /api/commands/{id}/claim
   action=hang -> passorder 限价买/卖
@@ -15,7 +14,7 @@
 一轮结束后至少等 ROUND_GAP_SEC 秒再开始下一轮。
 """
 TOKEN = ''
-STRATEGY_VERSION = 'exec-v4'
+STRATEGY_VERSION = 'exec-v5'
 ACCOUNT = '220500068710'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
@@ -268,39 +267,8 @@ def _fetch_commands():
     return data.get('commands') or [], None
 
 
-def _holder():
-    # 只用 run_id：热更新换版本号时仍是同一个持有者
-    return 'exec:%s' % _LOG_STATE['run_id']
-
-
-def _acquire_lease(ContextInfo):
-    """True 表示本实例持有执行器租约。旧服务器没有该接口(404)时照常执行。"""
-    code, content = _http_json('/api/commands/lease', {'holder': _holder()}, method='POST')
-    data = _parse_json(content)
-    if code == 404:
-        if not _EXEC['lease_404']:
-            _EXEC['lease_404'] = True
-            _debug(ContextInfo, 'lease api missing on server, running without lease', 'warn')
-        return True
-    if code != 200 or not data or not data.get('ok'):
-        _debug(ContextInfo, 'lease http=%s body=%s' % (code, str(content)[:300]), 'error')
-        return False
-    if data.get('held'):
-        if _EXEC['lease_busy']:
-            _EXEC['lease_busy'] = ''
-            _debug(ContextInfo, 'lease acquired holder=%s' % _holder())
-        return True
-    other = str(data.get('holder') or '')
-    now = _now()
-    if other != _EXEC['lease_busy'] or now - _EXEC['lease_warn'] >= 60:
-        _EXEC['lease_busy'] = other
-        _EXEC['lease_warn'] = now
-        _debug(ContextInfo, 'another executor is active (%s), this instance stays idle' % other, 'warn')
-    return False
-
-
 def _claim(cmd_id):
-    code, content = _http_json('/api/commands/%s/claim' % cmd_id, {'holder': _holder()}, method='POST')
+    code, content = _http_json('/api/commands/%s/claim' % cmd_id, {}, method='POST')
     data = _parse_json(content)
     if code != 200 or not data or not data.get('ok'):
         return None, 'claim http=%s body=%s' % (code, str(content)[:500])
@@ -314,7 +282,7 @@ def _result(cmd_id, ok, broker_order_id='', error=''):
 
 
 # busy: 一轮进行中，定时器再触发直接返回；next_at: 上一轮结束 + ROUND_GAP_SEC
-_EXEC = {'busy': False, 'next_at': 0, 'lease_busy': '', 'lease_warn': 0, 'lease_404': False}
+_EXEC = {'busy': False, 'next_at': 0}
 
 
 def _round(ContextInfo, where):
@@ -360,10 +328,6 @@ def _run_once(ContextInfo):
         _flush_debug(ContextInfo)
         return
 
-    if not _acquire_lease(ContextInfo):
-        _flush_debug(ContextInfo)
-        return
-
     cmds, err = _fetch_commands()
     if err:
         _debug(ContextInfo, err, 'error')
@@ -380,9 +344,6 @@ def _run_once(ContextInfo):
     for cmd in cmds:
         cid = cmd.get('id')
         claimed, cerr = _claim(cid)
-        if cerr and 'EXECUTOR_BUSY' in cerr:
-            _debug(ContextInfo, 'lost executor lease, stop this round: %s' % cerr, 'warn')
-            break
         if cerr or not claimed:
             _debug(ContextInfo, 'skip %s: %s' % (cid, cerr or 'empty'), 'error')
             continue
@@ -423,8 +384,8 @@ def init(ContextInfo):
             _debug(ContextInfo, 'set_account ok')
         except Exception as e:
             _debug(ContextInfo, 'set_account error: %s' % e, 'error')
-    _debug(ContextInfo, 'hang executor init %s %s -> %s holder=%s gap=%ss' % (
-        STRATEGY_VERSION, ','.join(STOCKS), BASE_URL, _holder(), ROUND_GAP_SEC))
+    _debug(ContextInfo, 'hang executor init %s %s -> %s gap=%ss' % (
+        STRATEGY_VERSION, ','.join(STOCKS), BASE_URL, ROUND_GAP_SEC))
 
     if _try_start_run_time(ContextInfo):
         _round(ContextInfo, 'init')
@@ -445,5 +406,5 @@ RELOAD_KEEP = ['_LOG_BUF', '_LOG_STATE', '_EXEC']
 
 
 def on_reload(ContextInfo):
-    _debug(ContextInfo, 'reloaded %s holder=%s gap=%ss' % (STRATEGY_VERSION, _holder(), ROUND_GAP_SEC))
+    _debug(ContextInfo, 'reloaded %s gap=%ss' % (STRATEGY_VERSION, ROUND_GAP_SEC))
     _flush_debug(ContextInfo)

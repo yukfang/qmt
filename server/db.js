@@ -203,42 +203,6 @@ async function ensureSchema() {
       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
     )
   `);
-  await db.query(`
-    CREATE TABLE IF NOT EXISTS service_lease (
-      name VARCHAR(64) NOT NULL PRIMARY KEY,
-      holder VARCHAR(64) NOT NULL,
-      lease_until DATETIME(3) NOT NULL,
-      updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
-    )
-  `);
-}
-
-// Single-owner lease (e.g. the QMT order executor). The holder column is assigned first, so the
-// lease_until assignment below already sees the new owner (MySQL applies SET left to right).
-async function acquireLease(name, holder, ttlSec) {
-  const id = String(holder || "").trim().slice(0, 64);
-  if (!id) return { held: false, holder: "" };
-  const ttl = Math.max(1, Math.min(300, Number(ttlSec) || 15));
-  const db = getPool();
-  await db.query(
-    `INSERT INTO service_lease (name, holder, lease_until)
-     VALUES (?, ?, NOW(3) + INTERVAL ? SECOND)
-     ON DUPLICATE KEY UPDATE
-       holder = IF(holder = VALUES(holder) OR lease_until < NOW(3), VALUES(holder), holder),
-       lease_until = IF(holder = VALUES(holder), VALUES(lease_until), lease_until)`,
-    [name, id, ttl]
-  );
-  const cur = await activeLeaseHolder(name);
-  return { held: cur === id, holder: cur };
-}
-
-async function activeLeaseHolder(name) {
-  const db = getPool();
-  const [rows] = await db.query(
-    `SELECT holder FROM service_lease WHERE name = ? AND lease_until >= NOW(3)`,
-    [name]
-  );
-  return rows[0] ? String(rows[0].holder) : "";
 }
 
 // QMT only reports today's deals, so the latest deal is kept here; after a quiet day the row
@@ -1236,8 +1200,6 @@ module.exports = {
   getLastDeal,
   rememberLastDeal,
   listLandingHangs,
-  acquireLease,
-  activeLeaseHolder,
   saveCruiseBookIfOn,
   normalizeStockCode,
   renewCruiseLease,

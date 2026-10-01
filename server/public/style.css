@@ -851,8 +851,12 @@ body.cruise-on .ladder-section {
   right: 4px;
 }
 
-.ladder-row.last-deal {
-  background: linear-gradient(90deg, rgba(255, 204, 0, 0.16), rgba(255, 204, 0, 0) 60%);
+.ladder-row.last-deal-buy {
+  background: linear-gradient(90deg, rgba(52, 199, 89, 0.28), rgba(52, 199, 89, 0) 60%);
+}
+
+.ladder-row.last-deal-sell {
+  background: linear-gradient(90deg, rgba(255, 59, 48, 0.22), rgba(255, 59, 48, 0) 60%);
 }
 
 .ladder-row.last-deal .price {

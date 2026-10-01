@@ -471,7 +471,7 @@ function rowKey(row) {
 }
 
 function rowClass(row) {
-  return `ladder-row${rowEmpty(row) ? " empty" : ""}${row.lastDeal ? " last-deal" : ""}`;
+  return `ladder-row${rowEmpty(row) ? " empty" : ""}${row.lastDeal ? ` last-deal last-deal-${lastDealSide(row)}` : ""}`;
 }
 
 function ladderFingerprint(levels, tick, data) {
