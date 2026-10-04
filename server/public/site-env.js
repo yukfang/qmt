@@ -13,13 +13,11 @@
   icon.type = "image/svg+xml";
   icon.href = local ? "/favicon-local.svg" : "/favicon-cloud.svg";
 
-  var apple = document.querySelector('link[rel="apple-touch-icon"]');
-  if (!apple) {
-    apple = document.createElement("link");
-    apple.rel = "apple-touch-icon";
-    document.head.appendChild(apple);
+  if ("serviceWorker" in navigator && (location.protocol === "https:" || local)) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("/sw.js").catch(function () {});
+    });
   }
-  apple.href = icon.href;
 
   var baseTitle = "QMT Bridge";
   if (location.pathname.indexOf("login") !== -1) {
