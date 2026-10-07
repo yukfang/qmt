@@ -12,8 +12,8 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-title" content="QMT" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <link rel="stylesheet" href="./style.css?v=0.9.46" />
-    <script src="./site-env.js?v=0.9.46"></script>
+    <link rel="stylesheet" href="./style.css?v=0.9.47" />
+    <script src="./site-env.js?v=0.9.47"></script>
   </head>
   <body>
     <header>
@@ -49,6 +49,13 @@
         <strong id="hang-qty-value">10000</strong>
         <input id="hang-qty" type="range" min="5000" max="15000" step="1000" value="10000" />
       </label>
+      <div class="grid-control">
+        <label for="grid-step">步长</label>
+        <input id="grid-step" type="number" min="0.001" max="0.100" step="0.001" inputmode="decimal" autocomplete="off" />
+        <label for="grid-gap">价差</label>
+        <input id="grid-gap" type="number" min="0.001" max="1.000" step="0.001" inputmode="decimal" autocomplete="off" />
+        <span id="grid-min" class="grid-min"></span>
+      </div>
     </header>
     <div class="pin-bar">
       <nav id="stock-switch" class="stock-switch" aria-label="股票"></nav>
@@ -70,6 +77,6 @@
       </section>
     </main>
     <div id="alerts" class="alerts"></div>
-    <script src="./app.js?v=0.9.46"></script>
+    <script src="./app.js?v=0.9.47"></script>
   </body>
 </html>

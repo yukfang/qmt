@@ -521,6 +521,39 @@ html[data-sim="1"] header {
   accent-color: var(--blue);
 }
 
+.grid-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--secondary);
+}
+
+.grid-control input {
+  width: 5.8em;
+  border: 0;
+  border-radius: 10px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--label);
+  background: rgba(120, 120, 128, 0.12);
+  font-variant-numeric: tabular-nums;
+}
+
+.grid-control input:disabled {
+  opacity: 0.55;
+}
+
+.grid-min {
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .cruise-btn {
   border: 0;
   border-radius: 999px;
@@ -566,6 +599,7 @@ body.cruise-on .cruise-btn {
 
 body.cruise-on .ladder-section,
 body.cruise-on .qty-control,
+body.cruise-on .grid-control,
 body.cruise-on .cancel-all-btn {
   pointer-events: none;
 }

@@ -188,6 +188,9 @@ async function ensureSchema() {
   await ensureColumn("user_cruise", "lease_holder", "VARCHAR(64) NULL");
   await ensureColumn("user_cruise", "lease_until", "DATETIME(3) NULL");
   await ensureColumn("user_cruise", "hang_qty", "INT NULL");
+  await ensureColumn("user_cruise", "grid_step", "DECIMAL(8,3) NULL");
+  await ensureColumn("user_cruise", "reverse_gap", "DECIMAL(8,3) NULL");
+  await ensureColumn("user_cruise", "min_spread", "DECIMAL(8,3) NULL");
   await ensureCruiseChannelWidth();
   await db.query(`
     CREATE TABLE IF NOT EXISTS stock_last_deal (
@@ -985,7 +988,8 @@ async function getCruiseState(username, channel, stock) {
   const ch = cruiseChannel(channel, stock);
   const db = getPool();
   let [rows] = await db.query(
-    `SELECT cruise_on, rungs_json, hang_qty FROM user_cruise WHERE username = ? AND channel = ?`,
+    `SELECT cruise_on, rungs_json, hang_qty, grid_step, reverse_gap, min_spread
+     FROM user_cruise WHERE username = ? AND channel = ?`,
     [username, ch]
   );
   if (!rows.length && ch.endsWith(":159781.SZ")) {
@@ -1005,6 +1009,9 @@ async function getCruiseState(username, channel, stock) {
         prevDeal: book.prevDeal,
         seenDeals: await listCruiseSeen(username, legacy, "deal"),
         seenFails: await listCruiseSeen(username, legacy, "fail"),
+        step: 0,
+        reverseGap: 0,
+        minSpread: 0,
       };
     }
   }
@@ -1019,7 +1026,42 @@ async function getCruiseState(username, channel, stock) {
     prevDeal: book.prevDeal,
     seenDeals: await listCruiseSeen(username, ch, "deal"),
     seenFails: await listCruiseSeen(username, ch, "fail"),
+    step: Number(rows[0] && rows[0].grid_step) || 0,
+    reverseGap: Number(rows[0] && rows[0].reverse_gap) || 0,
+    minSpread: Number(rows[0] && rows[0].min_spread) || 0,
   };
+}
+
+// Grid settings stay on the row while cruise is off. A cruise that is already on cannot be edited.
+async function setCruiseGrid(username, stock, grid) {
+  const ch = cruiseChannel("live", stock);
+  const db = getPool();
+  const [existing] = await db.query(
+    `SELECT cruise_on FROM user_cruise WHERE username = ? AND channel = ?`,
+    [username, ch]
+  );
+  if (existing.length && Number(existing[0].cruise_on)) {
+    return { ok: false, locked: true, error: "巡航已开启，不能修改步长和价差" };
+  }
+  const params = [grid.step, grid.reverseGap, grid.minSpread];
+  if (!existing.length) {
+    await db.query(
+      `INSERT INTO user_cruise (username, channel, cruise_on, grid_step, reverse_gap, min_spread)
+       VALUES (?, ?, 0, ?, ?, ?)`,
+      [username, ch, ...params]
+    );
+  } else {
+    const [result] = await db.query(
+      `UPDATE user_cruise
+       SET grid_step = ?, reverse_gap = ?, min_spread = ?
+       WHERE username = ? AND channel = ? AND cruise_on = 0`,
+      [...params, username, ch]
+    );
+    if (!result.affectedRows) {
+      return { ok: false, locked: true, error: "巡航已开启，不能修改步长和价差" };
+    }
+  }
+  return { ok: true, state: await getCruiseState(username, "live", stock) };
 }
 
 async function setCruiseState(username, channel, on, stock, qty = 0) {
@@ -1195,6 +1237,7 @@ module.exports = {
   finishHangOrder,
   getCruiseState,
   setCruiseState,
+  setCruiseGrid,
   saveCruiseRungs,
   listActiveCruises,
   getLastDeal,

@@ -485,7 +485,7 @@ app.get(
   auth.requireUser,
   asyncHandler(async (req, res) => {
     const state = await db.getCruiseState(req.username, req.query.channel, req.query.stock);
-    res.json({ ok: true, engine: cruiseEngineOn, ...state });
+    res.json({ ok: true, engine: cruiseEngineOn, ...state, ...cruise.resolvedGrid(req.query.stock, state) });
   })
 );
 
@@ -505,7 +505,27 @@ app.post(
       sendFail(req, res, 400, "CRUISE_ENABLE_REJECTED", out.error);
       return;
     }
-    res.json({ ok: true, engine: cruiseEngineOn, ...out.state, note: out.note || "" });
+    res.json({ ok: true, engine: cruiseEngineOn, ...out.state, ...cruise.resolvedGrid(body.stock, out.state), note: out.note || "" });
+  })
+);
+
+app.post(
+  "/api/cruise/grid",
+  auth.requireUser,
+  asyncHandler(async (req, res) => {
+    const body = req.body || {};
+    const out = await cruise.saveGrid(req.username, body.stock, body);
+    if (!out.ok) {
+      sendFail(
+        req,
+        res,
+        out.locked ? 409 : 400,
+        out.locked ? "CRUISE_GRID_LOCKED" : "CRUISE_GRID_REJECTED",
+        out.error || "不能保存步长和价差"
+      );
+      return;
+    }
+    res.json({ ok: true, ...out.state, ...cruise.resolvedGrid(body.stock, out.state) });
   })
 );
 

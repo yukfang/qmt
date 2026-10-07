@@ -20,6 +20,60 @@ function profileOf(stock) {
   return PROFILES[db.normalizeStockCode(stock)] || null;
 }
 
+// Saved step/gap replace the stock defaults. Unset (0) keeps the default.
+function gridOf(profile, state) {
+  if (!profile) return null;
+  const step = num(state && state.step);
+  const reverseGap = num(state && state.reverseGap);
+  const minSpread = num(state && state.minSpread);
+  if (!(step > 0) && !(reverseGap > 0) && !(minSpread > 0)) return profile;
+  return {
+    ...profile,
+    buyStep: step > 0 ? step : profile.buyStep,
+    sellStep: step > 0 ? step : profile.sellStep,
+    reverseGap: reverseGap > 0 ? reverseGap : profile.reverseGap,
+    minSpread: minSpread > 0 ? minSpread : profile.minSpread,
+  };
+}
+
+function resolvedGrid(stock, state) {
+  const profile = gridOf(profileOf(stock), state);
+  if (!profile) return {};
+  return { step: profile.buyStep, reverseGap: profile.reverseGap, minSpread: profile.minSpread };
+}
+
+function asTick(value, label, min, max) {
+  const n = num(value);
+  if (!Number.isFinite(n)) return { error: `${label}需要是数字` };
+  const rounded = Math.round(n * SCALE) / SCALE;
+  if (Math.abs(rounded - n) > 1e-4) return { error: `${label}需为 0.001 的整数倍` };
+  if (rounded < min || rounded > max) return { error: `${label}需在 ${min.toFixed(3)} 到 ${max.toFixed(3)} 之间` };
+  return { value: rounded };
+}
+
+// 价差 is the reverse gap. The buy/sell floor stays the stock's extra cushion above that
+// (0.001 for 159781, 0 for 516310), so editing 价差 keeps today's relationship.
+function normalizeGrid(stock, input) {
+  const profile = profileOf(stock);
+  if (!profile) return { error: `不支持巡航的股票：${stock}` };
+  const body = input || {};
+  const step = asTick(body.step, "步长", TICK, 0.1);
+  if (step.error) return step;
+  const gap = asTick(body.gap != null ? body.gap : body.reverseGap, "价差", TICK, 1);
+  if (gap.error) return gap;
+  const cushion = roundTickPx(profile.minSpread - profile.reverseGap);
+  return { step: step.value, reverseGap: gap.value, minSpread: roundTickPx(gap.value + cushion) };
+}
+
+async function saveGrid(username, stock, input) {
+  const code = db.normalizeStockCode(stock);
+  const parsed = normalizeGrid(code, input);
+  if (parsed.error) return { ok: false, error: parsed.error };
+  const state = await db.getCruiseState(username, "live", code);
+  if (state.on) return { ok: false, locked: true, error: "巡航已开启，不能修改步长和价差" };
+  return db.setCruiseGrid(username, code, parsed);
+}
+
 function num(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
@@ -499,8 +553,8 @@ function log(level, stock, username, message) {
     .catch((err) => console.error("cruise log failed:", err.message));
 }
 
-function makeCtx({ username, stock, data, state, qty }) {
-  const profile = profileOf(stock);
+function makeCtx({ username, stock, data, state, qty, profile }) {
+  profile = profile || gridOf(profileOf(stock), state);
   const ctx = {
     username,
     stock,
@@ -698,15 +752,17 @@ function planFromLastDeal(ctx) {
 // Enable: validate against the latest snapshot, fill both ladders, then switch cruise on.
 async function enableCruise(username, stock, qty) {
   const code = db.normalizeStockCode(stock);
-  const profile = profileOf(code);
-  if (!profile) return { ok: false, error: `不支持巡航的股票：${stock}` };
+  const base = profileOf(code);
+  if (!base) return { ok: false, error: `不支持巡航的股票：${stock}` };
+  const saved = await db.getCruiseState(username, "live", code);
+  const profile = gridOf(base, saved);
   const data = await db.getSnapshot(0, code);
   const hasSell = liveHangQtyMaps(data).sell.size > 0;
   const reason = cruiseEnableError(data, profile);
   if (reason && (hasSell || !reason.startsWith("没有卖挂"))) return { ok: false, error: reason };
   const lease = await db.renewCruiseLease(username, "live", code, HOLDER);
   if (!lease.held && lease.reason === "busy") return { ok: false, error: "巡航正由另一个服务器实例执行，请稍后再试" };
-  const ctx = makeCtx({ username, stock: code, data, state: { qty }, qty });
+  const ctx = makeCtx({ username, stock: code, data, state: saved, qty, profile });
 
   let sellStart = 0;
   let note = "";
@@ -756,7 +812,7 @@ async function enableCruise(username, stock, qty) {
   }
   await db.renewCruiseLease(username, "live", code, HOLDER);
   if (note) ctx.alert(note);
-  ctx.info(`开启巡航 数量 ${ctx.qty}`);
+  ctx.info(`开启巡航 数量 ${ctx.qty} 步长 ${profile.buyStep.toFixed(3)} 价差 ${profile.reverseGap.toFixed(3)}`);
   return { ok: true, state: { ...state, dropped: [...new Set([...(state.dropped || []), ...dropped])] }, note };
 }
 
@@ -809,4 +865,7 @@ async function stop() {
   } catch (_err) {}
 }
 
-module.exports = { start, stop, tickAll, tickOne, enableCruise, disableCruise, HOLDER, _test: { cruiseEnableError, cruiseFillPlans, makeCtx } };
+module.exports = {
+  start, stop, tickAll, tickOne, enableCruise, disableCruise, saveGrid, resolvedGrid, HOLDER,
+  _test: { cruiseEnableError, cruiseFillPlans, makeCtx, normalizeGrid },
+};

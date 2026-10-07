@@ -1001,6 +1001,93 @@ function readSavedQty(stock) {
   return snapQty(stockProfile(id).qtyDefault || QTY_DEFAULT);
 }
 
+function gridNumbers(stock) {
+  const profile = stockProfile(stock);
+  const book = cruiseBook(stock);
+  const cushion = Math.round((profile.minSpread - profile.reverseGap) * 1000) / 1000;
+  return {
+    step: book.step > 0 ? book.step : profile.buyStep,
+    gap: book.reverseGap > 0 ? book.reverseGap : profile.reverseGap,
+    minSpread: book.minSpread > 0 ? book.minSpread : profile.minSpread,
+    cushion,
+  };
+}
+
+function paintGrid(stock) {
+  const id = normalizeStockId(stock || selectedStock());
+  if (id !== selectedStock()) return;
+  const grid = gridNumbers(id);
+  const locked = Boolean(cruiseBook(id).on);
+  const stepEl = document.getElementById("grid-step");
+  const gapEl = document.getElementById("grid-gap");
+  const hint = document.getElementById("grid-min");
+  if (stepEl) {
+    stepEl.disabled = locked;
+    stepEl.title = "相邻挂单的价格间隔";
+    if (document.activeElement !== stepEl) stepEl.value = grid.step.toFixed(3);
+  }
+  if (gapEl) {
+    gapEl.disabled = locked;
+    gapEl.title = grid.cushion > 0
+      ? `成交后反挂的价差。买卖挂单至少间隔价差 + ${grid.cushion.toFixed(3)}`
+      : "成交后反挂的价差，买卖挂单至少保持这个间距";
+    if (document.activeElement !== gapEl) gapEl.value = grid.gap.toFixed(3);
+  }
+  if (hint) hint.textContent = `买卖间距 ${grid.minSpread.toFixed(3)}`;
+}
+
+async function saveGrid() {
+  const stock = selectedStock();
+  const book = cruiseBook(stock);
+  const stepEl = document.getElementById("grid-step");
+  const gapEl = document.getElementById("grid-gap");
+  if (!stepEl || !gapEl || book.gridBusy) return;
+  if (book.on) {
+    paintGrid(stock);
+    return;
+  }
+  const step = Number(stepEl.value);
+  const gap = Number(gapEl.value);
+  const current = gridNumbers(stock);
+  if (!Number.isFinite(step) || !Number.isFinite(gap)) {
+    paintGrid(stock);
+    pushAlert("步长和价差需要是数字");
+    return;
+  }
+  if (Math.abs(step - current.step) < 1e-9 && Math.abs(gap - current.gap) < 1e-9) return;
+  book.gridBusy = true;
+  try {
+    const res = await fetch("/api/cruise/grid", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ stock, step, gap }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    book.step = Number(data.step) || step;
+    book.reverseGap = Number(data.reverseGap) || gap;
+    book.minSpread = Number(data.minSpread) || 0;
+    paintGrid(stock);
+  } catch (err) {
+    stepEl.value = current.step.toFixed(3);
+    gapEl.value = current.gap.toFixed(3);
+    paintGrid(stock);
+    pushAlert(`${stockProfile(stock).label} 步长和价差未保存：${err.message}`);
+  } finally {
+    book.gridBusy = false;
+  }
+}
+
+function wireGrid() {
+  const stepEl = document.getElementById("grid-step");
+  const gapEl = document.getElementById("grid-gap");
+  if (!stepEl || !gapEl || stepEl.dataset.wired) return;
+  stepEl.dataset.wired = "1";
+  stepEl.addEventListener("change", () => { saveGrid().catch((err) => pushAlert(err.message)); });
+  gapEl.addEventListener("change", () => { saveGrid().catch((err) => pushAlert(err.message)); });
+}
+
 function hangQty(stock) {
   const id = normalizeStockId(stock || selectedStock());
   if (id === selectedStock()) {
@@ -1611,6 +1698,7 @@ function paintCruise(on) {
   }
   const qty = document.getElementById("hang-qty");
   if (qty) qty.disabled = on;
+  paintGrid(selectedStock());
   document.querySelectorAll(".cancel-all-btn").forEach((el) => {
     el.disabled = on;
   });
@@ -1624,6 +1712,9 @@ function applyCruiseFromServer(state, stock) {
   const on = Boolean(state.on);
   book.on = on;
   book.cruiseQty = Number(state.qty) || 0;
+  if (Number(state.step) > 0) book.step = Number(state.step);
+  if (Number(state.reverseGap) > 0) book.reverseGap = Number(state.reverseGap);
+  if (Number(state.minSpread) > 0) book.minSpread = Number(state.minSpread);
   if (id !== selectedStock()) {
     paintStockSwitch();
     return;
@@ -1891,6 +1982,8 @@ setInterval(() => {
 }, 3000);
 
 loadHangQty();
+paintGrid(selectedStock());
+wireGrid();
 paintStockSwitch();
 wireStockSwitch();
 const cruiseBtn = document.getElementById("cruise-btn");

@@ -29,6 +29,13 @@ function makeFakeDb() {
     async getCruiseState() {
       return { ...state.cruise, seenDeals: [...state.seen].filter((k) => k.startsWith("deal|")).map((k) => k.slice(5)), seenFails: [] };
     },
+    async setCruiseGrid(_u, _s, grid) {
+      if (state.cruise.on) return { ok: false, locked: true, error: "巡航已开启，不能修改步长和价差" };
+      state.cruise.step = grid.step;
+      state.cruise.reverseGap = grid.reverseGap;
+      state.cruise.minSpread = grid.minSpread;
+      return { ok: true, state: { ...state.cruise } };
+    },
     async setCruiseState(_u, _c, on, _s, qty) {
       state.cruise.on = on;
       if (qty) state.cruise.qty = qty;
@@ -274,6 +281,34 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   assert.ok(s.placed.some((o) => o.side === "buy" && o.price === 0.979), "without it the old bug re-buys 0.979");
   s.landing = [];
   console.log("16 landing reverse ok: no re-buy at 0.979 while the 0.990 sell is in flight");
+
+  // 17. step and reverse gap are per stock; 159781 keeps a 0.001 cushion on the min spread
+  const grid = cruise._test.normalizeGrid("159781.SZ", { step: 0.002, gap: 0.02 });
+  assert.deepStrictEqual({ step: grid.step, reverseGap: grid.reverseGap, minSpread: grid.minSpread }, { step: 0.002, reverseGap: 0.02, minSpread: 0.021 });
+  const grid516 = cruise._test.normalizeGrid("516310.SH", { step: 0.001, gap: 0.008 });
+  assert.strictEqual(grid516.minSpread, 0.008);
+  assert.ok(cruise._test.normalizeGrid("159781.SZ", { step: 0.0015, gap: 0.011 }).error);
+  s.cruise.on = false;
+  let saved = await cruise.saveGrid("u", "159781.SZ", { step: 0.002, gap: 0.02 });
+  assert.ok(saved.ok, saved.error);
+  assert.strictEqual(s.cruise.minSpread, 0.021);
+  s.cruise.on = true;
+  saved = await cruise.saveGrid("u", "159781.SZ", { step: 0.003, gap: 0.03 });
+  assert.ok(!saved.ok && saved.locked);
+  assert.strictEqual(s.cruise.step, 0.002, "on cruise ignores a new step");
+  console.log("17 grid save locked while on");
+
+  // 18. enable uses the saved step and gap, not the hardcoded profile
+  reset({ bid1: 0.994, ask1: 0.995, orders: [order("sell", 1.001, 5000, 50, 1)], deals: [] });
+  s.cruise.step = 0.002;
+  s.cruise.reverseGap = 0.02;
+  s.cruise.minSpread = 0.021;
+  out = await cruise.enableCruise("u", "159781.SZ", 5000);
+  assert.ok(out.ok, out.error);
+  assert.strictEqual(prices("sell")[0], "1.003");
+  assert.strictEqual(prices("buy")[0], "0.980");
+  assert.ok(s.logs.some((line) => line.includes("步长 0.002") && line.includes("价差 0.020")));
+  console.log("18 custom grid enable:", prices("sell")[0], prices("buy")[0]);
 
   console.log("\nlast engine logs:\n  " + s.logs.slice(-6).join("\n  "));
   console.log("\nALL PASSED");
