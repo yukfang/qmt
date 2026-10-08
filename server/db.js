@@ -210,8 +210,15 @@ async function ensureSchema() {
 
 // QMT only reports today's deals, so the latest deal is kept here; after a quiet day the row
 // still holds the previous trading day's last deal. Only a later-ranked deal overwrites it.
-async function rememberLastDeal(stock, deals) {
-  const last = pickLastDeal(deals);
+function shanghaiDateDigits(ms) {
+  const when = Number.isFinite(Number(ms)) && Number(ms) > 0 ? new Date(Number(ms)) : new Date();
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(when).replace(/\D/g, "");
+}
+
+async function rememberLastDeal(stock, deals, assumedDate) {
+  const last = pickLastDeal(deals, assumedDate);
   if (!last) return;
   const db = getPool();
   await db.query(
@@ -431,10 +438,11 @@ async function getSnapshot(since = 0, stock = "") {
   const payload = parsePayload(row.payload) || {};
   let lastDeal = await getLastDeal(rowStock);
   if (String(payload.source || "") !== "sim" && row.account !== "SIM") {
-    const fresh = pickLastDeal(payload.deals);
+    const assumedDate = shanghaiDateDigits(toEpochMs(row.updated_at_unix, row.updated_at));
+    const fresh = pickLastDeal(payload.deals, assumedDate);
     if (fresh && (!lastDeal || fresh.rank > lastDeal.rank)) {
       lastDeal = fresh;
-      await rememberLastDeal(rowStock, payload.deals).catch((err) => console.error("rememberLastDeal failed:", err.message));
+      await rememberLastDeal(rowStock, payload.deals, assumedDate).catch((err) => console.error("rememberLastDeal failed:", err.message));
     }
   }
   if (since > 0 && version > 0 && since >= version) {

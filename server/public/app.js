@@ -31,7 +31,7 @@ const STOCKS = [
     buyStep: 0.001,
     sellStep: 0.001,
     reverseGap: 0.006,
-    minSpread: 0.006,
+    minSpread: 0.007,
     levels: 10,
     qtyDefault: 10000,
     simBid: 1.385,

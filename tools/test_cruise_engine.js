@@ -80,8 +80,17 @@ function makeFakeDb() {
       }
       if (coverQty) {
         const px = Math.round(price * 1000);
-        const have = state.pending.filter((p) => p.side === side && Math.round(p.price * 1000) === px).reduce((a, p) => a + p.qty, 0);
-        if (have >= coverQty) return { covered: true };
+        const pendingQty = state.pending.filter((p) => p.side === side && Math.round(p.price * 1000) === px).reduce((a, p) => a + p.qty, 0);
+        const liveQty = (state.snapshot.orders || []).reduce((sum, row) => {
+          const name = String(row.m_strOptName || "");
+          const rowSide = name.includes("卖") ? "sell" : "buy";
+          const open = [48, 49, 50, 51, 52, 55].includes(row.m_nOrderStatus) && row.m_nVolumeTotal > 0;
+          if (!open || rowSide !== side || Math.round(row.m_dLimitPrice * 1000) !== px) return sum;
+          return sum + row.m_nVolumeTotal;
+        }, 0);
+        const room = Math.floor((coverQty - pendingQty - liveQty) / 100) * 100;
+        if (!(room > 0)) return { covered: true };
+        qty = Math.min(qty, room);
       }
       const order = { id: state.nextId++, side, price, qty, status: "pending" };
       state.pending.push(order);
@@ -151,16 +160,14 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   assert.strictEqual(s.placed.filter((o) => o.price === 0.99).length, 0);
   console.log("4 dedupe ok");
 
-  // 5. stale reverse: sell at 1.002 fills but bid has dropped to 0.987 -> clamped to 0.987 (user's choice)
+  // 5. sell at 1.002 fills and the clamped reverse lands on 0.987, which already has the cruise qty
   s.snapshot.bid1 = 0.987;
   s.snapshot.ask1 = 0.988;
   s.snapshot.deals.push(deal("sell", 1.002, 5000, "T2", 110, "100500"));
   s.placed = [];
   await cruise.tickAll();
-  const clamped = s.placed.find((o) => o.side === "buy" && o.qty === 5000 && o.price === 0.987);
-  assert.ok(clamped, summary(s.placed));
-  assert.ok(s.logs.some((l) => l.includes("目标 0.991 已越过")), "clamp is logged");
-  console.log("5 clamp ok:", summary(s.placed));
+  assert.ok(!s.placed.some((o) => o.side === "buy" && o.price === 0.987), `full level is not stacked: ${summary(s.placed)}`);
+  console.log("5 no stack on a full level:", summary(s.placed));
 
   // 6. lease held elsewhere -> no orders
   s.leaseBusy = true;
@@ -178,9 +185,11 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   await cruise.tickAll();
   assert.ok(!s.seen.has("deal|t:T3"), "retryable failure unclaims");
   s.rejectBuyAbove = null;
+  s.placed = [];
   await cruise.tickAll();
-  assert.ok(s.placed.some((o) => o.side === "buy" && o.price === 0.987), summary(s.placed));
-  console.log("7 retry ok:", summary(s.placed));
+  assert.ok(s.seen.has("deal|t:T3"), "full level consumes the deal instead of retrying");
+  assert.ok(!s.placed.some((o) => o.side === "buy" && o.price === 0.987), summary(s.placed));
+  console.log("7 retry then covered ok:", summary(s.placed));
 
   // 8. sim snapshot is ignored
   s.snapshot.source = "sim";
@@ -259,6 +268,19 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   assert.strictEqual(picked.tradeId, "X2", "latest by time, 92500 is 09:25");
   console.log("15 pickLastDeal ok:", picked.side, picked.price, picked.time);
 
+  const prevDay = deal("sell", 0.988, 1000, "Y", 9, "145500");
+  prevDay.m_strTradeDate = "20261007";
+  const thisMorning = deal("buy", 1.001, 1000, "T", 8, "92500");
+  thisMorning.m_strTradeDate = "20261008";
+  const latest = pickLastDeal([prevDay, thisMorning]);
+  assert.strictEqual(latest.tradeId, "T", "morning fill on the current day outranks the previous afternoon");
+  assert.strictEqual(latest.time, "092500");
+  const undated = deal("buy", 1.002, 1000, "U", 7, "93015");
+  undated.m_strTradeDate = "";
+  const withSession = pickLastDeal([prevDay, undated], "20261008");
+  assert.strictEqual(withSession.tradeId, "U", "a session deal without a date still counts as that day");
+  console.log("15b current session outranks previous day");
+
   // 16. 09-30 13:13: buy 0.979 fills, reverse sell 0.990 is placed by QMT ('done') but the next
   // status push does not list it yet. The ladder must not re-anchor on 0.991 and re-buy 0.979.
   const ladderBuys = [0.978, 0.977, 0.976, 0.975, 0.974, 0.973, 0.972, 0.971, 0.97].map((p, i) => order("buy", p, 5000, 50, `LB${i}`));
@@ -282,11 +304,11 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   s.landing = [];
   console.log("16 landing reverse ok: no re-buy at 0.979 while the 0.990 sell is in flight");
 
-  // 17. step and reverse gap are per stock; 159781 keeps a 0.001 cushion on the min spread
+  // 17. both stocks keep 买卖间距 one tick wider than 价差
   const grid = cruise._test.normalizeGrid("159781.SZ", { step: 0.002, gap: 0.02 });
   assert.deepStrictEqual({ step: grid.step, reverseGap: grid.reverseGap, minSpread: grid.minSpread }, { step: 0.002, reverseGap: 0.02, minSpread: 0.021 });
   const grid516 = cruise._test.normalizeGrid("516310.SH", { step: 0.001, gap: 0.008 });
-  assert.strictEqual(grid516.minSpread, 0.008);
+  assert.strictEqual(grid516.minSpread, 0.009);
   assert.ok(cruise._test.normalizeGrid("159781.SZ", { step: 0.0015, gap: 0.011 }).error);
   s.cruise.on = false;
   let saved = await cruise.saveGrid("u", "159781.SZ", { step: 0.002, gap: 0.02 });
@@ -309,6 +331,28 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   assert.strictEqual(prices("buy")[0], "0.980");
   assert.ok(s.logs.some((line) => line.includes("步长 0.002") && line.includes("价差 0.020")));
   console.log("18 custom grid enable:", prices("sell")[0], prices("buy")[0]);
+
+  // 19. 516310: 价差 0.006, 买卖间距 0.007. After 1.400 sells, the new edge is 1.394,
+  // one tick above the existing 1.393 buy. That level gets one order, 1.393 is not stacked.
+  s.cruise = { on: true, qty: 5000, rungs: [], dropped: [], lastDeal: null, prevDeal: null };
+  s.snapshot = {
+    account: "A", stock: "516310.SH", updatedAt: 1, bid1: 1.394, ask1: 1.401,
+    orders: [
+      order("sell", 1.4, 0, 56, "S1400"),
+      order("sell", 1.401, 5000, 50, "S1401"),
+      order("buy", 1.393, 5000, 50, "B1393"),
+    ],
+    deals: [deal("sell", 1.4, 5000, "D1400", "S1400", "100000")],
+  };
+  s.pending = [];
+  s.placed = [];
+  s.seen = new Set();
+  s.logs = [];
+  await cruise.tickOne({ username: "u", stock: "516310.SH", qty: 5000 });
+  assert.ok(!s.placed.some((o) => o.side === "buy" && o.price === 1.393), `stacked 1.393: ${summary(s.placed)}`);
+  const edge = s.placed.find((o) => o.side === "buy" && o.price === 1.394);
+  assert.ok(edge && edge.qty === 5000, summary(s.placed));
+  console.log("19 spread kept without stacking:", summary(s.placed.filter((o) => o.price >= 1.393 && o.price <= 1.395)));
 
   console.log("\nlast engine logs:\n  " + s.logs.slice(-6).join("\n  "));
   console.log("\nALL PASSED");

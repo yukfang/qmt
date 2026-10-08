@@ -25,10 +25,13 @@ function dealTimeDigits(row) {
   return raw.length >= 5 ? raw.padStart(6, "0").slice(0, 6) : "";
 }
 
-function dealTimeRank(row) {
-  const dateDigits = String(row.m_strTradeDate || row.date || "").replace(/\D/g, "");
-  const raw = String(row.m_strTradeTime || row.time || row.m_strInsertTime || row.m_strTime || "").trim();
-  const digits = raw.replace(/\D/g, "");
+function dealTimeRank(row, dateOverride) {
+  const dateDigits = String(dateOverride || (row && (row.m_strTradeDate || row.date || row.m_strInsertDate)) || "").replace(/\D/g, "");
+  const raw = String((row && (row.m_strTradeTime || row.time || row.m_strInsertTime || row.m_strTime)) || "").trim();
+  // QMT sends times before 10:00 as 5 digits (92500 = 09:25:00). Leaving them unpadded
+  // drops the date from the rank, so a morning fill loses to the previous day's afternoon fill.
+  let digits = raw.replace(/\D/g, "");
+  if (digits.length === 5) digits = digits.padStart(6, "0");
   if (digits.length >= 6) {
     const hh = Number(digits.slice(0, 2)) || 0;
     const mm = Number(digits.slice(2, 4)) || 0;
@@ -41,17 +44,18 @@ function dealTimeRank(row) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-// Latest deal in a QMT deal list, or null. Rows without a trade date cannot be ranked
-// against another day's deal, so they are skipped.
-function pickLastDeal(deals) {
+// Latest deal in a QMT deal list, today or an earlier day. assumedDate fills in rows
+// that QMT sent without a trade date (its deal list is the current session).
+function pickLastDeal(deals, assumedDate) {
+  const fallback = String(assumedDate || "").replace(/\D/g, "").slice(0, 8);
   let best = null;
   for (const row of deals || []) {
     const side = optSide(row);
     const price = Math.round(dealPrice(row) * 1000) / 1000;
     const qty = dealQty(row);
-    const date = dealDateDigits(row);
+    const date = dealDateDigits(row) || (fallback.length === 8 ? fallback : "");
     if ((side !== "buy" && side !== "sell") || !(price > 0) || !(qty > 0) || !date) continue;
-    const rank = dealTimeRank(row);
+    const rank = dealTimeRank(row, date);
     if (!best || rank > best.rank) {
       best = {
         side,

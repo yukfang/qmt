@@ -3,6 +3,7 @@
 // and places cruise hangs into pending_orders (executed by the QMT order_exec strategy).
 const os = require("os");
 const db = require("./db");
+const { dealTimeRank } = require("./deals");
 
 const TICK = 0.001;
 const SCALE = Math.round(1 / TICK);
@@ -13,7 +14,7 @@ const HOLDER = `srv:${os.hostname()}:${process.pid}`.slice(0, 64);
 
 const PROFILES = {
   "159781.SZ": { id: "159781.SZ", label: "159781", buyStep: 0.001, sellStep: 0.001, reverseGap: 0.011, minSpread: 0.012, levels: 10, qtyDefault: 10000 },
-  "516310.SH": { id: "516310.SH", label: "516310", buyStep: 0.001, sellStep: 0.001, reverseGap: 0.006, minSpread: 0.006, levels: 10, qtyDefault: 10000 },
+  "516310.SH": { id: "516310.SH", label: "516310", buyStep: 0.001, sellStep: 0.001, reverseGap: 0.006, minSpread: 0.007, levels: 10, qtyDefault: 10000 },
 };
 
 function profileOf(stock) {
@@ -51,8 +52,7 @@ function asTick(value, label, min, max) {
   return { value: rounded };
 }
 
-// 价差 is the reverse gap. The buy/sell floor stays the stock's extra cushion above that
-// (0.001 for 159781, 0 for 516310), so editing 价差 keeps today's relationship.
+// 价差 is the reverse gap. 买卖间距 is always one tick wider, for every stock.
 function normalizeGrid(stock, input) {
   const profile = profileOf(stock);
   if (!profile) return { error: `不支持巡航的股票：${stock}` };
@@ -61,8 +61,7 @@ function normalizeGrid(stock, input) {
   if (step.error) return step;
   const gap = asTick(body.gap != null ? body.gap : body.reverseGap, "价差", TICK, 1);
   if (gap.error) return gap;
-  const cushion = roundTickPx(profile.minSpread - profile.reverseGap);
-  return { step: step.value, reverseGap: gap.value, minSpread: roundTickPx(gap.value + cushion) };
+  return { step: step.value, reverseGap: gap.value, minSpread: roundTickPx(gap.value + TICK) };
 }
 
 async function saveGrid(username, stock, input) {
@@ -237,22 +236,6 @@ function cruiseBasePrice(data, row) {
     }
   }
   return dealPrice(row);
-}
-
-function dealTimeRank(row) {
-  const dateDigits = String(row.m_strTradeDate || row.date || "").replace(/\D/g, "");
-  const raw = String(row.m_strTradeTime || row.time || row.m_strInsertTime || row.m_strTime || "").trim();
-  const digits = raw.replace(/\D/g, "");
-  if (digits.length >= 6) {
-    const hh = Number(digits.slice(0, 2)) || 0;
-    const mm = Number(digits.slice(2, 4)) || 0;
-    const ss = Number(digits.slice(4, 6)) || 0;
-    const ms = digits.length > 6 ? Number(digits.slice(6).padEnd(3, "0").slice(0, 3)) || 0 : 0;
-    const day = dateDigits.length >= 8 ? Number(dateDigits.slice(0, 8)) || 0 : 0;
-    return day * 1e10 + hh * 1e8 + mm * 1e6 + ss * 1e3 + ms;
-  }
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 function compareCruiseDeals(data, a, b) {
@@ -521,6 +504,23 @@ function seedCruisePlans(ctx) {
   return plans;
 }
 
+// A reverse that would sit inside the fixed buy/sell gap is moved to the edge of that gap.
+// Buys cannot be higher than lowest sell − minSpread. Sells cannot be lower than highest buy + minSpread.
+function spreadSafeReverse(ctx, plan) {
+  const maps = hangMapsWithPending(ctx.data);
+  const spread = Math.round(ctx.profile.minSpread * SCALE);
+  if (!(spread > 0)) return plan;
+  if (plan.side === "buy" && maps.sell.size) {
+    const cap = Math.min(...maps.sell.keys()) - spread;
+    if (priceToIdx(plan.price) > cap && cap > 0) return { ...plan, price: idxToPrice(cap) };
+  }
+  if (plan.side === "sell" && maps.buy.size) {
+    const floor = Math.max(...maps.buy.keys()) + spread;
+    if (priceToIdx(plan.price) < floor) return { ...plan, price: idxToPrice(floor) };
+  }
+  return plan;
+}
+
 function cruiseReversePlan(ctx, row) {
   const { data, profile } = ctx;
   const side = optSide(row);
@@ -682,11 +682,13 @@ async function tickOne({ username, stock, qty }) {
         for (const key of plan.keys) await db.unclaimCruiseSeen(username, "live", "deal", key, stock);
         continue;
       }
-      const label = plan.side === "sell" ? "卖挂" : "买挂";
-      const verb = plan.dealSide === "sell" ? "卖成" : "买成";
-      const clamped = Math.abs(plan.rawPx - plan.price) > 1e-9 ? `（目标 ${plan.rawPx.toFixed(3)} 已越过，按${plan.side === "buy" ? "买一" : "卖一"}挂）` : "";
+      const kept = spreadSafeReverse(ctx, plan);
+      const label = kept.side === "sell" ? "卖挂" : "买挂";
+      const verb = kept.dealSide === "sell" ? "卖成" : "买成";
+      const clamped = Math.abs(kept.rawPx - kept.price) > 1e-9 ? `（目标 ${kept.rawPx.toFixed(3)} 已越过，按${kept.side === "buy" ? "买一" : "卖一"}挂）` : "";
       try {
-        await placePlan(ctx, { side: plan.side, price: plan.price, qty: q }, `${verb} ${plan.dealPx.toFixed(3)} 反挂${clamped}`, clamped ? "warn" : "info");
+        // coverQty keeps each price at the cruise quantity. A full level is left as it is.
+        await placePlan(ctx, { side: kept.side, price: kept.price, qty: q, coverQty: ctx.qty }, `${verb} ${kept.dealPx.toFixed(3)} 反挂${clamped}`, clamped ? "warn" : "info");
       } catch (err) {
         ctx.fail(`${label}失败 ${plan.price.toFixed(3)} × ${q}：${err.message}`);
         if (isRetryableHangError(err.message)) {
