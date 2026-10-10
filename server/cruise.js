@@ -127,6 +127,30 @@ function dealKey(row) {
   return `o:${oid}:${t}:${dealPrice(row)}:${num(row.m_nVolume || row.qty)}`;
 }
 
+// Order ids whose fills must not be reversed yet: the order is still working (partly filled),
+// or QMT reports more traded volume than the deal rows that have arrived so far.
+function unsettledOrderIds(data) {
+  const dealQtyByOrder = new Map();
+  for (const row of (data && data.deals) || []) {
+    const oid = String(row.order_id || row.m_strOrderSysID || "");
+    if (!oid) continue;
+    dealQtyByOrder.set(oid, (dealQtyByOrder.get(oid) || 0) + num(row.m_nVolume || row.qty));
+  }
+  const out = new Set();
+  for (const row of orderRows(data)) {
+    const oid = orderRowId(row);
+    if (!oid) continue;
+    const remaining = num(row.m_nVolumeTotal);
+    if (OPEN_STATUS.has(statusCode(row)) && remaining > 0) {
+      out.add(oid);
+      continue;
+    }
+    const traded = num(row.m_nVolumeTraded) || Math.max(0, num(row.m_nVolumeTotalOriginal) - remaining);
+    if (traded > 0 && (dealQtyByOrder.get(oid) || 0) < traded) out.add(oid);
+  }
+  return out;
+}
+
 function isUsableState(data) {
   if (!data || data.updatedAt == null) return false;
   if (String(data.source || "") === "sim" || String(data.account || "") === "SIM") return false;
@@ -140,16 +164,21 @@ function pendingHangRequests(data) {
   });
 }
 
+// A partly filled order still occupies its price with its full size until it is done, and a
+// filled order keeps it until all its deal rows have arrived and its reverse can be placed.
+// Otherwise the level is topped up next to it.
 function liveHangQtyMaps(data) {
   const buy = new Map();
   const sell = new Map();
+  const unsettled = unsettledOrderIds(data);
   for (const row of orderRows(data)) {
     const side = optSide(row) || "buy";
     const remaining = num(row.m_nVolumeTotal);
-    if (!OPEN_STATUS.has(statusCode(row)) || !(remaining > 0)) continue;
+    const open = OPEN_STATUS.has(statusCode(row)) && remaining > 0;
+    if (!open && !unsettled.has(orderRowId(row))) continue;
     const idx = priceToIdx(orderPrice(row));
     const map = side === "sell" ? sell : buy;
-    map.set(idx, (map.get(idx) || 0) + remaining);
+    map.set(idx, (map.get(idx) || 0) + Math.max(remaining, num(row.m_nVolumeTotalOriginal), num(row.m_nVolumeTraded)));
   }
   return { buy, sell };
 }
@@ -644,10 +673,14 @@ async function tickOne({ username, stock, qty }) {
 
   const resumePlans = resumeCruisePlans(ctx);
   const seedPlans = resumePlans.length ? [] : seedCruisePlans(ctx);
+  // A partly filled order is reversed once, for its whole quantity, after it is fully filled.
+  // Its deal rows stay unclaimed until then. A cancelled order reverses whatever did fill.
+  const unsettled = unsettledOrderIds(data);
   const fresh = [];
   for (const row of data.deals || []) {
     const key = dealKey(row);
     if (!key || book.seenDeals.has(key)) continue;
+    if (unsettled.has(String(row.order_id || row.m_strOrderSysID || ""))) continue;
     fresh.push({ row, key });
   }
   fresh.sort((a, b) => compareCruiseDeals(data, a.row, b.row));

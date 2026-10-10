@@ -44,32 +44,99 @@ function dealTimeRank(row, dateOverride) {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-// Latest deal in a QMT deal list, today or an earlier day. assumedDate fills in rows
-// that QMT sent without a trade date (its deal list is the current session).
-function pickLastDeal(deals, assumedDate) {
+function normalizeDeal(row, assumedDate) {
   const fallback = String(assumedDate || "").replace(/\D/g, "").slice(0, 8);
-  let best = null;
-  for (const row of deals || []) {
-    const side = optSide(row);
-    const price = Math.round(dealPrice(row) * 1000) / 1000;
-    const qty = dealQty(row);
-    const date = dealDateDigits(row) || (fallback.length === 8 ? fallback : "");
-    if ((side !== "buy" && side !== "sell") || !(price > 0) || !(qty > 0) || !date) continue;
-    const rank = dealTimeRank(row, date);
-    if (!best || rank > best.rank) {
-      best = {
-        side,
-        price,
-        qty,
-        date,
-        time: dealTimeDigits(row),
-        tradeId: String(row.m_strTradeID || row.trade_id || ""),
-        orderId: String(row.m_strOrderSysID || row.order_id || ""),
-        rank,
-      };
-    }
-  }
-  return best;
+  const side = optSide(row);
+  const price = Math.round(dealPrice(row) * 1000) / 1000;
+  const qty = dealQty(row);
+  const date = dealDateDigits(row) || (fallback.length === 8 ? fallback : "");
+  if ((side !== "buy" && side !== "sell") || !(price > 0) || !(qty > 0) || !date) return null;
+  return {
+    side,
+    price,
+    qty,
+    date,
+    time: dealTimeDigits(row),
+    tradeId: String(row.m_strTradeID || row.trade_id || ""),
+    orderId: String(row.m_strOrderSysID || row.order_id || ""),
+    rank: dealTimeRank(row, date),
+  };
 }
 
-module.exports = { num, optSide, dealPrice, dealQty, dealDateDigits, dealTimeDigits, dealTimeRank, pickLastDeal };
+function dealIdentity(deal) {
+  if (deal.tradeId) return `id:${deal.tradeId}`;
+  return `k:${deal.date}|${deal.time}|${deal.side}|${deal.price}|${deal.qty}|${deal.orderId}`;
+}
+
+function orderKey(deal) {
+  // Partial fills of one hanging order share m_strOrderSysID. Without an order id, each trade stands alone.
+  if (deal.orderId) return `ord:${deal.orderId}`;
+  return dealIdentity(deal);
+}
+
+function byNewest(a, b) {
+  return Number(b.rank) - Number(a.rank) || String(b.tradeId).localeCompare(String(a.tradeId));
+}
+
+// One row per hanging order. Fills of the same order add their quantity and keep the latest print.
+// The same trade reported twice is not added twice.
+function collapseOrders(deals) {
+  const trades = new Map();
+  for (const deal of deals || []) {
+    if (!deal || !(Number(deal.rank) > 0)) continue;
+    const id = dealIdentity(deal);
+    const prev = trades.get(id);
+    if (!prev || Number(deal.rank) > Number(prev.rank)) trades.set(id, { ...deal, qty: Math.round(Number(deal.qty)) });
+  }
+  const orders = new Map();
+  for (const deal of trades.values()) {
+    const key = orderKey(deal);
+    const prev = orders.get(key);
+    if (!prev) {
+      orders.set(key, { ...deal });
+      continue;
+    }
+    const newer = Number(deal.rank) >= Number(prev.rank) ? deal : prev;
+    const qty = Math.round(Number(prev.qty) + Number(deal.qty));
+    orders.set(key, { ...newer, qty });
+  }
+  return [...orders.values()];
+}
+
+// Newest first. Stored rows and a fresh push of the same order stay one row:
+// the quantity is the larger total, so a collapsed row is not added on top of its own slices.
+function mergeRecentDeals(stored, incoming, limit = 3) {
+  const byKey = new Map();
+  for (const deal of collapseOrders(stored)) byKey.set(orderKey(deal), deal);
+  for (const deal of collapseOrders(incoming)) {
+    const key = orderKey(deal);
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, deal);
+      continue;
+    }
+    const newer = Number(deal.rank) >= Number(prev.rank) ? deal : prev;
+    byKey.set(key, { ...newer, qty: Math.max(Math.round(Number(prev.qty)), Math.round(Number(deal.qty))) });
+  }
+  return [...byKey.values()].sort(byNewest).slice(0, limit);
+}
+
+// Latest deals in a QMT deal list, newest first, today or an earlier day.
+// assumedDate fills in rows that QMT sent without a trade date (its deal list is the current session).
+function pickRecentDeals(deals, assumedDate, limit = 3) {
+  const incoming = [];
+  for (const row of deals || []) {
+    const deal = normalizeDeal(row, assumedDate);
+    if (deal) incoming.push(deal);
+  }
+  return mergeRecentDeals([], incoming, limit);
+}
+
+function pickLastDeal(deals, assumedDate) {
+  return pickRecentDeals(deals, assumedDate, 1)[0] || null;
+}
+
+module.exports = {
+  num, optSide, dealPrice, dealQty, dealDateDigits, dealTimeDigits, dealTimeRank,
+  pickLastDeal, pickRecentDeals, mergeRecentDeals,
+};

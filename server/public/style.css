@@ -460,6 +460,8 @@ html[data-sim="1"] header {
   margin: 0 0 12px;
   color: var(--secondary);
   font-size: 13px;
+  white-space: pre-line;
+  line-height: 1.45;
 }
 
 .pin-bar {
@@ -885,12 +887,67 @@ body.cruise-on .ladder-section {
   right: 4px;
 }
 
+.tag.recent-mark::after,
+.ladder-row .price.recent-mark::after {
+  content: "";
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #8e8e93;
+  color: #fff;
+  font-size: 8px;
+  line-height: 13px;
+  text-align: center;
+  font-weight: 700;
+  box-shadow: 0 0 0 1.5px #fff;
+  pointer-events: none;
+}
+
+.tag.recent-mark-2::after,
+.ladder-row .price.recent-mark-2::after {
+  content: "2";
+}
+
+.tag.recent-mark-3::after,
+.ladder-row .price.recent-mark-3::after {
+  content: "3";
+}
+
+.tag.recent-mark,
+.ladder-row .price.recent-mark {
+  position: relative;
+}
+
+.ladder-row .price.recent-mark::after {
+  top: 1px;
+  right: 4px;
+}
+
 .ladder-row.last-deal-buy {
   background: linear-gradient(90deg, rgba(52, 199, 89, 0.28), rgba(52, 199, 89, 0) 60%);
 }
 
 .ladder-row.last-deal-sell {
   background: linear-gradient(90deg, rgba(255, 59, 48, 0.22), rgba(255, 59, 48, 0) 60%);
+}
+
+.ladder-row.recent-2.last-deal-buy {
+  background: linear-gradient(90deg, rgba(52, 199, 89, 0.14), rgba(52, 199, 89, 0) 50%);
+}
+
+.ladder-row.recent-2.last-deal-sell {
+  background: linear-gradient(90deg, rgba(255, 59, 48, 0.12), rgba(255, 59, 48, 0) 50%);
+}
+
+.ladder-row.recent-3.last-deal-buy {
+  background: linear-gradient(90deg, rgba(52, 199, 89, 0.08), rgba(52, 199, 89, 0) 42%);
+}
+
+.ladder-row.recent-3.last-deal-sell {
+  background: linear-gradient(90deg, rgba(255, 59, 48, 0.07), rgba(255, 59, 48, 0) 42%);
 }
 
 .ladder-row.last-deal .price {

@@ -1,5 +1,5 @@
 const fs = require("fs");
-const { pickLastDeal } = require("./deals");
+const { pickRecentDeals, mergeRecentDeals } = require("./deals");
 const path = require("path");
 const mysql = require("mysql2/promise");
 
@@ -206,10 +206,12 @@ async function ensureSchema() {
       updated_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3)
     )
   `);
+  await ensureColumn("stock_last_deal", "recent_json", "TEXT NULL");
 }
 
-// QMT only reports today's deals, so the latest deal is kept here; after a quiet day the row
-// still holds the previous trading day's last deal. Only a later-ranked deal overwrites it.
+// QMT only reports the current session's deals. The newest three are kept here, so a quiet
+// day still shows the previous session. A later-ranked deal replaces the oldest of the three.
+// The single columns stay equal to the newest deal; cruise reads that one.
 function shanghaiDateDigits(ms) {
   const when = Number.isFinite(Number(ms)) && Number(ms) > 0 ? new Date(Number(ms)) : new Date();
   return new Intl.DateTimeFormat("en-CA", {
@@ -217,44 +219,82 @@ function shanghaiDateDigits(ms) {
   }).format(when).replace(/\D/g, "");
 }
 
-async function rememberLastDeal(stock, deals, assumedDate) {
-  const last = pickLastDeal(deals, assumedDate);
-  if (!last) return;
-  const db = getPool();
-  await db.query(
-    `INSERT INTO stock_last_deal (stock, side, price, qty, trade_date, trade_time, trade_id, order_id, rank_no)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       side = IF(VALUES(rank_no) > rank_no, VALUES(side), side),
-       price = IF(VALUES(rank_no) > rank_no, VALUES(price), price),
-       qty = IF(VALUES(rank_no) > rank_no, VALUES(qty), qty),
-       trade_date = IF(VALUES(rank_no) > rank_no, VALUES(trade_date), trade_date),
-       trade_time = IF(VALUES(rank_no) > rank_no, VALUES(trade_time), trade_time),
-       trade_id = IF(VALUES(rank_no) > rank_no, VALUES(trade_id), trade_id),
-       order_id = IF(VALUES(rank_no) > rank_no, VALUES(order_id), order_id),
-       rank_no = GREATEST(rank_no, VALUES(rank_no))`,
-    [stock, last.side, last.price, last.qty, last.date, last.time, last.tradeId.slice(0, 64), last.orderId.slice(0, 64), last.rank]
-  );
-}
-
-async function getLastDeal(stock) {
-  const db = getPool();
-  const [rows] = await db.query(
-    `SELECT side, price, qty, trade_date, trade_time, trade_id, order_id, rank_no FROM stock_last_deal WHERE stock = ?`,
-    [normalizeStockCode(stock)]
-  );
-  const row = rows[0];
+function rowToDeal(row) {
   if (!row) return null;
+  const side = row.side === "sell" ? "sell" : row.side === "buy" ? "buy" : "";
+  const price = Number(row.price);
+  const qty = Number(row.qty);
+  const date = String(row.trade_date || "");
+  const rank = Number(row.rank_no) || 0;
+  if (!side || !(price > 0) || !(qty > 0) || date.length < 8 || !(rank > 0)) return null;
   return {
-    side: row.side,
-    price: Number(row.price),
-    qty: Number(row.qty),
-    date: String(row.trade_date),
+    side,
+    price,
+    qty,
+    date,
     time: String(row.trade_time || ""),
     tradeId: String(row.trade_id || ""),
     orderId: String(row.order_id || ""),
-    rank: Number(row.rank_no) || 0,
+    rank,
   };
+}
+
+function parseRecentJson(raw) {
+  if (!raw) return [];
+  try {
+    const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!Array.isArray(data)) return [];
+    return data.filter((deal) => deal && (deal.side === "buy" || deal.side === "sell") && Number(deal.rank) > 0);
+  } catch {
+    return [];
+  }
+}
+
+async function getRecentDeals(stock) {
+  const db = getPool();
+  const [rows] = await db.query(
+    `SELECT side, price, qty, trade_date, trade_time, trade_id, order_id, rank_no, recent_json
+     FROM stock_last_deal WHERE stock = ?`,
+    [normalizeStockCode(stock)]
+  );
+  const row = rows[0];
+  if (!row) return [];
+  const stored = parseRecentJson(row.recent_json);
+  const last = rowToDeal(row);
+  return mergeRecentDeals(stored, last ? [last] : [], 3);
+}
+
+async function getLastDeal(stock) {
+  const recent = await getRecentDeals(stock);
+  return recent[0] || null;
+}
+
+async function rememberLastDeal(stock, deals, assumedDate) {
+  const incoming = pickRecentDeals(deals, assumedDate, 3);
+  if (!incoming.length) return;
+  const recent = mergeRecentDeals(await getRecentDeals(stock), incoming, 3);
+  const last = recent[0];
+  if (!last) return;
+  const db = getPool();
+  await db.query(
+    `INSERT INTO stock_last_deal (stock, side, price, qty, trade_date, trade_time, trade_id, order_id, rank_no, recent_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       recent_json = IF(VALUES(rank_no) >= rank_no, VALUES(recent_json), recent_json),
+       side = IF(VALUES(rank_no) >= rank_no, VALUES(side), side),
+       price = IF(VALUES(rank_no) >= rank_no, VALUES(price), price),
+       qty = IF(VALUES(rank_no) >= rank_no, VALUES(qty), qty),
+       trade_date = IF(VALUES(rank_no) >= rank_no, VALUES(trade_date), trade_date),
+       trade_time = IF(VALUES(rank_no) >= rank_no, VALUES(trade_time), trade_time),
+       trade_id = IF(VALUES(rank_no) >= rank_no, VALUES(trade_id), trade_id),
+       order_id = IF(VALUES(rank_no) >= rank_no, VALUES(order_id), order_id),
+       rank_no = GREATEST(rank_no, VALUES(rank_no))`,
+    [
+      normalizeStockCode(stock), last.side, last.price, last.qty, last.date, last.time,
+      String(last.tradeId || "").slice(0, 64), String(last.orderId || "").slice(0, 64), last.rank,
+      JSON.stringify(recent),
+    ]
+  );
 }
 
 async function ensureColumn(table, column, def) {
@@ -342,7 +382,7 @@ async function saveSnapshot(payload) {
     [account, stock, json, hash, nextVersion]
   );
   if (String(payload.source || "") !== "sim" && account !== "SIM") {
-    await rememberLastDeal(stock, payload.deals).catch((err) => console.error("rememberLastDeal failed:", err.message));
+    await rememberLastDeal(stock, payload.deals, shanghaiDateDigits()).catch((err) => console.error("rememberLastDeal failed:", err.message));
   }
   const [rows] = await db.query(
     `SELECT updated_at, UNIX_TIMESTAMP(updated_at) AS updated_at_unix, version
@@ -436,15 +476,17 @@ async function getSnapshot(since = 0, stock = "") {
   const pendingCancels = await listCancelRequests({ stock: rowStock });
   const failedHangs = await listFailedHangs({ stock: rowStock });
   const payload = parsePayload(row.payload) || {};
-  let lastDeal = await getLastDeal(rowStock);
+  let lastDeals = await getRecentDeals(rowStock);
   if (String(payload.source || "") !== "sim" && row.account !== "SIM") {
     const assumedDate = shanghaiDateDigits(toEpochMs(row.updated_at_unix, row.updated_at));
-    const fresh = pickLastDeal(payload.deals, assumedDate);
-    if (fresh && (!lastDeal || fresh.rank > lastDeal.rank)) {
-      lastDeal = fresh;
+    const merged = mergeRecentDeals(lastDeals, pickRecentDeals(payload.deals, assumedDate, 3), 3);
+    const changed = JSON.stringify(merged) !== JSON.stringify(lastDeals);
+    if (changed && merged.length) {
+      lastDeals = merged;
       await rememberLastDeal(rowStock, payload.deals, assumedDate).catch((err) => console.error("rememberLastDeal failed:", err.message));
     }
   }
+  const lastDeal = lastDeals[0] || null;
   if (since > 0 && version > 0 && since >= version) {
     return {
       unchanged: true,
@@ -455,6 +497,7 @@ async function getSnapshot(since = 0, stock = "") {
       pendingCancels,
       failedHangs,
       lastDeal,
+      lastDeals,
     };
   }
   const updatedAt = toEpochMs(row.updated_at_unix, row.updated_at);
@@ -474,6 +517,7 @@ async function getSnapshot(since = 0, stock = "") {
     pendingCancels,
     failedHangs,
     lastDeal,
+    lastDeals,
   };
 }
 
@@ -648,7 +692,8 @@ function snapshotOpenQty(snapshot, side, price) {
     const rowSide = name.includes("卖") ? "sell" : name.includes("买") ? "buy" : "";
     if (rowSide !== side) continue;
     if (roundPrice(row.m_dLimitPrice || row.price) !== price) continue;
-    qty += remaining;
+    // A partly filled order still counts at its full size until it is done.
+    qty += Math.max(remaining, Number(row.m_nVolumeTotalOriginal) || 0);
   }
   return qty;
 }
@@ -1249,6 +1294,7 @@ module.exports = {
   saveCruiseRungs,
   listActiveCruises,
   getLastDeal,
+  getRecentDeals,
   rememberLastDeal,
   listLandingHangs,
   saveCruiseBookIfOn,

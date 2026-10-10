@@ -86,7 +86,7 @@ function makeFakeDb() {
           const rowSide = name.includes("卖") ? "sell" : "buy";
           const open = [48, 49, 50, 51, 52, 55].includes(row.m_nOrderStatus) && row.m_nVolumeTotal > 0;
           if (!open || rowSide !== side || Math.round(row.m_dLimitPrice * 1000) !== px) return sum;
-          return sum + row.m_nVolumeTotal;
+          return sum + Math.max(row.m_nVolumeTotal, row.m_nVolumeTotalOriginal || 0);
         }, 0);
         const room = Math.floor((coverQty - pendingQty - liveQty) / 100) * 100;
         if (!(room > 0)) return { covered: true };
@@ -118,6 +118,10 @@ function deal(side, price, qty, tradeId, orderId, time) {
   return { m_strOptName: side === "sell" ? "限价卖出" : "限价买入", m_dPrice: price, m_nVolume: qty, m_strTradeID: tradeId, m_strOrderSysID: String(orderId), m_strTradeTime: time, m_strTradeDate: "20260928" };
 }
 const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.qty}`).join(" ");
+function markFilled(orders, id) {
+  const row = orders.find((o) => o.m_strOrderSysID === String(id));
+  if (row) Object.assign(row, { m_nVolumeTotal: 0, m_nOrderStatus: 56 });
+}
 
 (async () => {
   const s = fake.state;
@@ -164,6 +168,7 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   s.snapshot.bid1 = 0.987;
   s.snapshot.ask1 = 0.988;
   s.snapshot.deals.push(deal("sell", 1.002, 5000, "T2", 110, "100500"));
+  markFilled(s.snapshot.orders, 110);
   s.placed = [];
   await cruise.tickAll();
   assert.ok(!s.placed.some((o) => o.side === "buy" && o.price === 0.987), `full level is not stacked: ${summary(s.placed)}`);
@@ -172,6 +177,7 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   // 6. lease held elsewhere -> no orders
   s.leaseBusy = true;
   s.snapshot.deals.push(deal("sell", 1.003, 5000, "T3", 111, "100600"));
+  markFilled(s.snapshot.orders, 111);
   s.placed = [];
   await cruise.tickAll();
   assert.strictEqual(s.placed.length, 0);
@@ -263,10 +269,37 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   assert.strictEqual((s.cancels || []).length, 0);
   console.log("14 sell present unchanged:", out.error);
 
-  const { pickLastDeal } = require("../server/deals");
-  const picked = pickLastDeal([deal("buy", 0.987, 5000, "X1", 1, "133855"), deal("sell", 0.997, 2800, "X2", 2, "141033"), deal("buy", 1.037, 5000, "X3", 3, "92500")]);
+  const { pickLastDeal, pickRecentDeals, mergeRecentDeals } = require("../server/deals");
+  const three = [deal("buy", 0.987, 5000, "X1", 1, "133855"), deal("sell", 0.997, 2800, "X2", 2, "141033"), deal("buy", 1.037, 5000, "X3", 3, "92500")];
+  const picked = pickLastDeal(three);
   assert.strictEqual(picked.tradeId, "X2", "latest by time, 92500 is 09:25");
-  console.log("15 pickLastDeal ok:", picked.side, picked.price, picked.time);
+  assert.deepStrictEqual(pickRecentDeals(three).map((d) => d.tradeId), ["X2", "X1", "X3"]);
+  const older = { side: "sell", price: 0.9, qty: 100, date: "20260927", time: "150000", tradeId: "OLD", orderId: "", rank: 1 };
+  const merged = mergeRecentDeals([older], pickRecentDeals(three), 3);
+  assert.deepStrictEqual(merged.map((d) => d.tradeId), ["X2", "X1", "X3"]);
+  const kept = mergeRecentDeals([older], pickRecentDeals(three).slice(0, 2), 3);
+  assert.deepStrictEqual(kept.map((d) => d.tradeId), ["X2", "X1", "OLD"]);
+  const parts = [
+    deal("buy", 1.42, 1300, "P1", "ORD", "134624"),
+    deal("buy", 1.42, 400, "P2", "ORD", "134649"),
+    deal("buy", 1.42, 300, "P3", "ORD", "134749"),
+    deal("sell", 1.42, 3000, "S1", "OTHER", "095217"),
+  ];
+  const grouped = pickRecentDeals(parts);
+  assert.strictEqual(grouped[0].tradeId, "P3");
+  assert.strictEqual(grouped[0].qty, 2000);
+  assert.strictEqual(grouped[0].time, "134749");
+  assert.strictEqual(grouped[1].tradeId, "S1");
+  const slices = parts.slice(0, 3).map((row) => pickRecentDeals([row])[0]);
+  const once = mergeRecentDeals(slices, pickRecentDeals(parts.slice(0, 3)), 3);
+  assert.strictEqual(once.length, 1);
+  assert.strictEqual(once[0].qty, 2000);
+  const alone = [
+    deal("buy", 1.42, 300, "A", "", "134624"),
+    deal("buy", 1.42, 400, "B", "", "134749"),
+  ];
+  assert.strictEqual(pickRecentDeals(alone).length, 2);
+  console.log("15 pickLastDeal ok:", picked.side, picked.price, picked.time, "partials", grouped[0].qty);
 
   const prevDay = deal("sell", 0.988, 1000, "Y", 9, "145500");
   prevDay.m_strTradeDate = "20261007";
@@ -353,6 +386,41 @@ const summary = (list) => list.map((o) => `${o.side}@${o.price.toFixed(3)}x${o.q
   const edge = s.placed.find((o) => o.side === "buy" && o.price === 1.394);
   assert.ok(edge && edge.qty === 5000, summary(s.placed));
   console.log("19 spread kept without stacking:", summary(s.placed.filter((o) => o.price >= 1.393 && o.price <= 1.395)));
+
+  // 20. buy 0.979 × 5000 fills 2200 then 2800. No reverse while it is partly filled,
+  // then one sell 0.990 × 5000 once the order is fully filled.
+  const partBuys = [0.978, 0.977, 0.976, 0.975, 0.974, 0.973, 0.972, 0.971, 0.97].map((p, i) => order("buy", p, 5000, 50, `PB${i}`));
+  const partSells = [0.991, 0.992, 0.993, 0.994, 0.995, 0.996, 0.997, 0.998, 0.999, 1.0].map((p, i) => order("sell", p, 5000, 50, `PS${i}`));
+  const working = { ...order("buy", 0.979, 2800, 55, "B979P"), m_nVolumeTotalOriginal: 5000, m_nVolumeTraded: 2200 };
+  s.cruise = { on: true, qty: 5000, rungs: [], dropped: [], lastDeal: null, prevDeal: null };
+  s.snapshot = {
+    account: "A", stock: "159781.SZ", updatedAt: 1, bid1: 0.979, ask1: 0.98,
+    orders: [working, ...partBuys, ...partSells],
+    deals: [deal("buy", 0.979, 2200, "P1", "B979P", "131000")],
+  };
+  s.pending = [];
+  s.landing = [];
+  s.placed = [];
+  s.seen = new Set();
+  await cruise.tickOne({ username: "u", stock: "159781.SZ", qty: 5000 });
+  assert.ok(!s.placed.some((o) => o.side === "sell"), `no reverse on a partial fill: ${summary(s.placed)}`);
+  assert.ok(!s.placed.some((o) => o.side === "buy" && o.price === 0.979), `no top-up beside the working order: ${summary(s.placed)}`);
+  assert.ok(!s.seen.has("deal|t:P1"), "partial deal stays unclaimed");
+
+  Object.assign(working, { m_nVolumeTotal: 0, m_nOrderStatus: 56, m_nVolumeTraded: 5000 });
+  s.placed = [];
+  await cruise.tickOne({ username: "u", stock: "159781.SZ", qty: 5000 });
+  assert.ok(!s.placed.some((o) => o.side === "sell"), `waits for the last deal row: ${summary(s.placed)}`);
+
+  s.snapshot.deals.push(deal("buy", 0.979, 2800, "P2", "B979P", "131200"));
+  s.placed = [];
+  await cruise.tickOne({ username: "u", stock: "159781.SZ", qty: 5000 });
+  const reverseSells = s.placed.filter((o) => o.side === "sell");
+  assert.strictEqual(reverseSells.length, 1, summary(s.placed));
+  assert.strictEqual(reverseSells[0].price, 0.99);
+  assert.strictEqual(reverseSells[0].qty, 5000);
+  assert.ok(!s.placed.some((o) => o.side === "buy" && o.price === 0.979), `no re-buy at the filled price: ${summary(s.placed)}`);
+  console.log("20 partial fill waits, full fill reverses once:", summary(reverseSells));
 
   console.log("\nlast engine logs:\n  " + s.logs.slice(-6).join("\n  "));
   console.log("\nALL PASSED");
