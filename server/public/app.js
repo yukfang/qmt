@@ -1979,9 +1979,7 @@ function paintStateMeta(data, stock) {
     else buyFills += 1;
   }
   if (data && data.updatedAt != null) setLatestSync(data.updatedAt);
-  const recent = recentDealsOf(data).map((deal, i) => lastDealText({ ...deal, n: i + 1 }));
-  const last = recent.length ? `\n${recent.join("\n")}` : "";
-  setMeta(`${stockProfile(id).label}  挂盘${open} 委托${orders} 买成${buyFills} 卖成${sellFills}${last}`);
+  setMeta(`${stockProfile(id).label}  挂盘${open} 委托${orders} 买成${buyFills} 卖成${sellFills}`);
 }
 
 async function switchStock(id) {

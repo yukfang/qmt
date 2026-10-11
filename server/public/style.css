@@ -927,27 +927,27 @@ body.cruise-on .ladder-section {
 }
 
 .ladder-row.last-deal-buy {
-  background: linear-gradient(90deg, rgba(52, 199, 89, 0.28), rgba(52, 199, 89, 0) 60%);
+  background: linear-gradient(270deg, rgba(52, 199, 89, 0.28), rgba(52, 199, 89, 0) 60%);
 }
 
 .ladder-row.last-deal-sell {
-  background: linear-gradient(90deg, rgba(255, 59, 48, 0.22), rgba(255, 59, 48, 0) 60%);
+  background: linear-gradient(270deg, rgba(255, 59, 48, 0.22), rgba(255, 59, 48, 0) 60%);
 }
 
 .ladder-row.recent-2.last-deal-buy {
-  background: linear-gradient(90deg, rgba(52, 199, 89, 0.14), rgba(52, 199, 89, 0) 50%);
+  background: linear-gradient(270deg, rgba(52, 199, 89, 0.14), rgba(52, 199, 89, 0) 50%);
 }
 
 .ladder-row.recent-2.last-deal-sell {
-  background: linear-gradient(90deg, rgba(255, 59, 48, 0.12), rgba(255, 59, 48, 0) 50%);
+  background: linear-gradient(270deg, rgba(255, 59, 48, 0.12), rgba(255, 59, 48, 0) 50%);
 }
 
 .ladder-row.recent-3.last-deal-buy {
-  background: linear-gradient(90deg, rgba(52, 199, 89, 0.08), rgba(52, 199, 89, 0) 42%);
+  background: linear-gradient(270deg, rgba(52, 199, 89, 0.08), rgba(52, 199, 89, 0) 42%);
 }
 
 .ladder-row.recent-3.last-deal-sell {
-  background: linear-gradient(90deg, rgba(255, 59, 48, 0.07), rgba(255, 59, 48, 0) 42%);
+  background: linear-gradient(270deg, rgba(255, 59, 48, 0.07), rgba(255, 59, 48, 0) 42%);
 }
 
 .ladder-row.last-deal .price {
