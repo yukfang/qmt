@@ -151,11 +151,13 @@ function markFilled(orders, id) {
   s.pending = [];
   s.placed = [];
 
-  // 3. a sell at 1.001 fills; bid still 0.994 -> reverse buy at 1.001 - 0.011 = 0.990
+  // 3. a sell at 1.001 fills; bid still 0.994 -> reverse buy at 1.001 - 0.011 = 0.990,
+  // and one new sell at 1.011 so the sell ladder stays at 10.
   s.snapshot.orders[0] = order("sell", 1.001, 0, 56, 1);
   s.snapshot.deals = [deal("sell", 1.001, 5000, "T1", 1, "100000")];
   await cruise.tickAll();
   assert.ok(s.placed.some((o) => o.side === "buy" && o.price === 0.99 && o.qty === 5000), summary(s.placed));
+  assert.ok(s.placed.some((o) => o.side === "sell" && o.price === 1.011 && o.qty === 5000), `sell top-up missing: ${summary(s.placed)}`);
   console.log("3 reverse ok:", summary(s.placed));
 
   // 4. same deal again -> nothing new (already seen)

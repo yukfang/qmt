@@ -684,10 +684,13 @@ async function tickOne({ username, stock, qty }) {
     fresh.push({ row, key });
   }
   fresh.sort((a, b) => compareCruiseDeals(data, a.row, b.row));
+  // Keep both ladders at profile.levels: after a sell fill, reverse + top up buys, and
+  // add the missing sell(s) above so open cruise sells stay at least 10.
   const buyTopUp = cruiseFillPlans(ctx, ["buy"]);
+  const sellTopUp = cruiseFillPlans(ctx, ["sell"]);
   const gapPlans = cruiseGapPlans(ctx);
 
-  if (fresh.length || buyTopUp.length || resumePlans.length || seedPlans.length || gapPlans.length) {
+  if (fresh.length || buyTopUp.length || sellTopUp.length || resumePlans.length || seedPlans.length || gapPlans.length) {
     const merged = new Map();
     for (const { row, key } of fresh) {
       const claimed = await db.claimCruiseSeen(username, "live", "deal", key, stock);
@@ -734,9 +737,7 @@ async function tickOne({ username, stock, qty }) {
     if (held && resumePlans.length) held = await placePlans(ctx, resumePlans, "跨天续航");
     if (held && seedPlans.length) held = await placePlans(ctx, seedPlans, "按昨日成交续航");
     if (held && !(book.rungs.length && !liveOpenRungs(data, book.dropped).length)) {
-      const { sell } = hangMapsWithPending(data);
-      const plans = cruiseFillPlans(ctx, ["buy"]);
-      if (!sell.size) plans.push(...cruiseFillPlans(ctx, ["sell"]));
+      const plans = cruiseFillPlans(ctx, ["buy", "sell"]);
       if (plans.length) await placePlans(ctx, plans, "补档");
     }
   }
