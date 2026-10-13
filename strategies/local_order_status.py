@@ -9,13 +9,17 @@ QMT -> Web 桥接（只读）。不要回测。
 不下单、不撤单。
 """
 
-STRATEGY_VERSION = 'local-status-v3'
+STRATEGY_VERSION = 'local-status-v5'
 STOCKS = ['159781.SZ', '516310.SH']
 STOCK_UNIVERSE = STOCKS[0]
 BASE_URL = 'https://qmt-console.enrichlife.today'
 POLL_SEC = 3
+# Cap each sync part so Cloudflare does not reject with 413 BODY_TOO_LARGE.
+SYNC_DEAL_LIMIT = 200
+SYNC_CANCEL_LIMIT = 200
 
 OPEN_STATUS = set([48, 49, 50, 51, 52, 55])
+CANCEL_STATUS = set([53, 54, 57])
 ACC_TYPES = ('stock', 'STOCK', 'credit', 'CREDIT')
 
 
@@ -154,6 +158,40 @@ def _is_open_order(row):
         return int(getattr(row, 'm_nOrderStatus', -1)) in OPEN_STATUS
     except Exception:
         return False
+
+
+def _is_cancel_order(row):
+    try:
+        st = int(getattr(row, 'm_nOrderStatus', -1))
+    except Exception:
+        st = -1
+    if st in CANCEL_STATUS:
+        return True
+    try:
+        amt = float(getattr(row, 'm_dCancelAmount', 0) or 0)
+    except Exception:
+        amt = 0
+    return amt > 0 and not _is_open_order(row)
+
+
+def _row_time_rank(row):
+    date = ''.join(ch for ch in str(_g(row, 'm_strTradeDate', 'm_strInsertDate', 'm_strDate') or '') if ch.isdigit())
+    raw = ''.join(ch for ch in str(_g(row, 'm_strTradeTime', 'm_strInsertTime', 'm_strOrderTime', 'm_strTime') or '') if ch.isdigit())
+    if len(raw) == 5:
+        raw = '0' + raw
+    day = date[:8] if len(date) >= 8 else '0'
+    tod = raw[:6].ljust(6, '0') if raw else '000000'
+    try:
+        return int(day) * 1000000 + int(tod)
+    except Exception:
+        return 0
+
+
+def _latest_rows(rows, limit):
+    rows = list(rows or [])
+    if limit <= 0 or len(rows) <= limit:
+        return rows
+    return sorted(rows, key=_row_time_rank, reverse=True)[:limit]
 
 
 def _resolve_trade_fn(ContextInfo):
@@ -449,27 +487,46 @@ def _sync_once(ContextInfo):
     if beat:
         _LOG_STATE['beat'] = now
     for stock in STOCKS:
-        # 每只股票单独 POST /api/sync，互不混在一个 payload 里
+        # 每只股票拆成 3 次 POST：挂单 / 成交 / 撤单，服务端按 part 合并进同一快照
         stock_orders = _filter_stock(orders, stock)
-        stock_deals = _filter_stock(deals, stock)
-        open_orders = [_order_view(o) for o in stock_orders if _is_open_order(o)]
-        order_views = [_order_view(o) for o in stock_orders]
-        deal_views = [_deal_view(d) for d in stock_deals]
+        open_views = [_order_view(o) for o in stock_orders if _is_open_order(o)]
+        cancel_views = [_order_view(o) for o in _latest_rows(
+            [o for o in stock_orders if _is_cancel_order(o)], SYNC_CANCEL_LIMIT)]
+        deal_views = [_deal_view(d) for d in _latest_rows(_filter_stock(deals, stock), SYNC_DEAL_LIMIT)]
         quote = quotes.get(stock) or {}
-        payload = {
+
+        hang_payload = {
             'account': ACCOUNT,
             'stock': stock,
-            'openOrders': open_orders,
-            'orders': order_views,
+            'part': 'hang',
+            'openOrders': open_views,
+            'orders': open_views,
+        }
+        hang_payload.update(quote)
+        deal_payload = {
+            'account': ACCOUNT,
+            'stock': stock,
+            'part': 'deal',
             'deals': deal_views,
         }
-        payload.update(quote)
-        code, content = _http_json('/api/sync', payload)
-        changed = code == 200 and '"unchanged":false' in str(content).replace(' ', '')
-        if code != 200 or changed or beat:
-            _debug(ContextInfo, 'sync %s http %s orders=%s deals=%s open=%s bid1=%s ask1=%s body=%s' % (
-                stock, code, len(order_views), len(deal_views), len(open_orders),
-                quote.get('bid1'), quote.get('ask1'), str(content)[:120 if code == 200 else 500]),
-                'info' if code == 200 else 'error')
+        cancel_payload = {
+            'account': ACCOUNT,
+            'stock': stock,
+            'part': 'cancel',
+            'cancels': cancel_views,
+            'orders': cancel_views,
+        }
+        for part, payload, n in (
+            ('hang', hang_payload, len(open_views)),
+            ('deal', deal_payload, len(deal_views)),
+            ('cancel', cancel_payload, len(cancel_views)),
+        ):
+            code, content = _http_json('/api/sync', payload)
+            changed = code == 200 and '"unchanged":false' in str(content).replace(' ', '')
+            if code != 200 or changed or beat:
+                _debug(ContextInfo, 'sync %s part=%s http %s n=%s bid1=%s ask1=%s body=%s' % (
+                    stock, part, code, n, quote.get('bid1'), quote.get('ask1'),
+                    str(content)[:120 if code == 200 else 500]),
+                    'info' if code == 200 else 'error')
     ContextInfo.last_push = now
     _flush_debug(ContextInfo)

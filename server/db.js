@@ -350,6 +350,71 @@ async function backfillSnapshotVersions() {
   }
 }
 
+const SYNC_OPEN_STATUS = new Set([48, 49, 50, 51, 52, 55]);
+const SYNC_CANCEL_STATUS = new Set([53, 54, 57]);
+const SYNC_QUOTE_KEYS = ["bid1", "ask1", "preClose", "lastClose", "lastPrice", "source"];
+
+function syncOrderStatus(row) {
+  return Number(row && (row.m_nOrderStatus != null ? row.m_nOrderStatus : row.status));
+}
+
+function isSyncOpenOrder(row) {
+  return SYNC_OPEN_STATUS.has(syncOrderStatus(row));
+}
+
+function isSyncCancelOrder(row) {
+  if (SYNC_CANCEL_STATUS.has(syncOrderStatus(row))) return true;
+  return Number((row && row.m_dCancelAmount) || 0) > 0 && !isSyncOpenOrder(row);
+}
+
+// part=hang|deal|cancel merges into the previous snapshot so each kind can POST alone.
+// part=full (default) replaces the payload, used by the browser sim and older strategies.
+function mergeSyncPayload(prev, incoming) {
+  const body = incoming || {};
+  const part = String(body.part || body.syncPart || "full").toLowerCase();
+  const strip = { ...body };
+  delete strip.part;
+  delete strip.syncPart;
+  delete strip.cancels;
+  if (!prev || part === "full" || part === "") {
+    return strip;
+  }
+  const next = {
+    ...prev,
+    account: strip.account || prev.account,
+    stock: strip.stock || prev.stock,
+  };
+  for (const key of SYNC_QUOTE_KEYS) {
+    if (strip[key] != null && strip[key] !== "") next[key] = strip[key];
+  }
+  if (part === "hang" || part === "open") {
+    const openOrders = Array.isArray(strip.openOrders)
+      ? strip.openOrders
+      : Array.isArray(strip.orders)
+        ? strip.orders
+        : [];
+    next.openOrders = openOrders;
+    const kept = (prev.orders || []).filter((row) => !isSyncOpenOrder(row));
+    next.orders = openOrders.concat(kept);
+    return next;
+  }
+  if (part === "deal" || part === "deals") {
+    next.deals = Array.isArray(strip.deals) ? strip.deals : [];
+    return next;
+  }
+  if (part === "cancel" || part === "cancels") {
+    const cancels = Array.isArray(body.cancels)
+      ? body.cancels
+      : Array.isArray(strip.orders)
+        ? strip.orders
+        : [];
+    const kept = (prev.orders || []).filter((row) => !isSyncCancelOrder(row));
+    next.orders = kept.concat(cancels);
+    return next;
+  }
+  return strip;
+}
+
 async function saveSnapshot(payload) {
   const account = String(payload.account || "");
   const stock = normalizeStockCode(payload.stock || "");
@@ -358,17 +423,21 @@ async function saveSnapshot(payload) {
     err.status = 400;
     throw err;
   }
-  payload.stock = stock;
-  const json = JSON.stringify(payload);
-  const hash = hashPayload(json);
   const db = getPool();
   const [cur] = await db.query(
-    `SELECT version, content_hash FROM sync_snapshot WHERE account = ? AND stock = ?`,
+    `SELECT version, content_hash, payload FROM sync_snapshot WHERE account = ? AND stock = ?`,
     [account, stock]
   );
-  const prev = cur[0];
-  const prevVersion = prev ? Number(prev.version) || 0 : 0;
-  const same = Boolean(prev && prev.content_hash && prev.content_hash === hash && prevVersion > 0);
+  const prevRow = cur[0];
+  const prevPayload = parsePayload(prevRow && prevRow.payload) || null;
+  const merged = mergeSyncPayload(prevPayload, { ...payload, stock });
+  merged.stock = stock;
+  if (!merged.account) merged.account = account;
+
+  const json = JSON.stringify(merged);
+  const hash = hashPayload(json);
+  const prevVersion = prevRow ? Number(prevRow.version) || 0 : 0;
+  const same = Boolean(prevRow && prevRow.content_hash && prevRow.content_hash === hash && prevVersion > 0);
   const nextVersion = same ? prevVersion : Math.max(1, prevVersion + 1);
 
   await db.query(
@@ -379,21 +448,28 @@ async function saveSnapshot(payload) {
        version = VALUES(version),
        updated_at = CURRENT_TIMESTAMP(3),
        content_hash = VALUES(content_hash)`,
-    [account, stock, json, hash, nextVersion]
+    [account || merged.account || "", stock, json, hash, nextVersion]
   );
-  if (String(payload.source || "") !== "sim" && account !== "SIM") {
-    await rememberLastDeal(stock, payload.deals, shanghaiDateDigits()).catch((err) => console.error("rememberLastDeal failed:", err.message));
+  const partName = String(payload.part || payload.syncPart || "full").toLowerCase() || "full";
+  if (
+    String(merged.source || "") !== "sim" &&
+    account !== "SIM" &&
+    Array.isArray(merged.deals) &&
+    (partName === "full" || partName === "deal" || partName === "deals" || partName === "")
+  ) {
+    await rememberLastDeal(stock, merged.deals, shanghaiDateDigits()).catch((err) => console.error("rememberLastDeal failed:", err.message));
   }
   const [rows] = await db.query(
     `SELECT updated_at, UNIX_TIMESTAMP(updated_at) AS updated_at_unix, version
      FROM sync_snapshot WHERE account = ? AND stock = ?`,
-    [account, stock]
+    [account || merged.account || "", stock]
   );
   return {
     updatedAt: rows[0] ? toEpochMs(rows[0].updated_at_unix, rows[0].updated_at) : Date.now(),
     version: rows[0] ? Number(rows[0].version) || nextVersion : nextVersion,
     unchanged: Boolean(same),
     stock,
+    part: String(payload.part || payload.syncPart || "full").toLowerCase() || "full",
   };
 }
 

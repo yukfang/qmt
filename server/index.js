@@ -157,15 +157,18 @@ app.post(
   asyncHandler(async (req, res) => {
     const body = req.body || {};
     const saved = await db.saveSnapshot(body);
+    const part = String(body.part || body.syncPart || "full").toLowerCase() || "full";
     res.json({
       ok: true,
       updatedAt: saved.updatedAt,
       version: saved.version,
       unchanged: saved.unchanged,
+      part: saved.part || part,
       counts: {
         openOrders: (body.openOrders || []).length,
-        orders: (body.orders || []).length,
+        orders: (body.orders || body.cancels || []).length,
         deals: (body.deals || []).length,
+        cancels: (body.cancels || (part === "cancel" ? body.orders : []) || []).length,
       },
     });
   })

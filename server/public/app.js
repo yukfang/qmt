@@ -399,6 +399,10 @@ function buildLevels(data, tick) {
     min = Math.min(min, mid - PRECLOSE_PAD);
     max = Math.max(max, mid + PRECLOSE_PAD);
   }
+  // Keep one empty rung above the top occupied price and one below the bottom,
+  // so the next hang price stays on screen (e.g. hang at 1.100 still shows 1.101).
+  max += 1;
+  min -= 1;
   const levels = [];
   for (let idx = max; idx >= min; idx -= 1) {
     levels.push({
