@@ -352,7 +352,7 @@ async function backfillSnapshotVersions() {
 
 const SYNC_OPEN_STATUS = new Set([48, 49, 50, 51, 52, 55]);
 const SYNC_CANCEL_STATUS = new Set([53, 54, 57]);
-const SYNC_QUOTE_KEYS = ["bid1", "ask1", "preClose", "lastClose", "lastPrice", "source"];
+const SYNC_QUOTE_KEYS = ["bid1", "ask1", "preClose", "lastClose", "lastPrice", "availableCash", "source"];
 
 function syncOrderStatus(row) {
   return Number(row && (row.m_nOrderStatus != null ? row.m_nOrderStatus : row.status));
@@ -688,6 +688,81 @@ function roundPrice(price) {
   return Math.round(Number(price) * 1000) / 1000;
 }
 
+function snapshotAvailableCash(snapshot) {
+  const value = Number(snapshot && snapshot.availableCash);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function buyFundsCheck(available, reserved, price, qty) {
+  const cash = Number.isFinite(Number(available)) && Number(available) >= 0 ? Number(available) : null;
+  const held = Math.max(0, Number(reserved) || 0);
+  const required = Math.max(0, Number(price) * Number(qty));
+  const usable = cash == null ? null : Math.max(0, cash - held);
+  return { available: cash, reserved: held, usable, required, enough: usable != null && usable + 1e-9 >= required };
+}
+
+function insufficientFundsError(available, required, reserved = 0) {
+  const usable = Math.max(0, Number(available) - Number(reserved || 0));
+  const err = new Error(
+    available == null
+      ? "可用金额尚未同步，跳过买挂"
+      : `可用金额不足：可用 ${usable.toFixed(2)}，下单需要 ${Number(required).toFixed(2)}`
+  );
+  err.status = 409;
+  err.code = available == null ? "AVAILABLE_CASH_MISSING" : "INSUFFICIENT_AVAILABLE_CASH";
+  return err;
+}
+
+async function assertBuyFunds(conn, snapshot, account, price, qty) {
+  const available = snapshotAvailableCash(snapshot);
+  const required = Number(price) * Number(qty);
+  if (available == null) throw insufficientFundsError(null, required);
+  const [rows] = await conn.query(
+    `SELECT COALESCE(SUM(price * qty), 0) AS amount
+     FROM pending_orders
+     WHERE account = ?
+       AND side = 'buy'
+       AND status IN ('pending', 'claimed')
+       AND (action = 'hang' OR action IS NULL OR action = '')`,
+    [account]
+  );
+  const reserved = Number(rows[0] && rows[0].amount) || 0;
+  const check = buyFundsCheck(available, reserved, price, qty);
+  if (!check.enough) {
+    throw insufficientFundsError(available, required, reserved);
+  }
+  return check;
+}
+
+async function acquireNamedLock(conn, name) {
+  const [rows] = await conn.query(`SELECT GET_LOCK(?, 5) AS locked`, [name]);
+  if (!rows[0] || Number(rows[0].locked) !== 1) {
+    const err = new Error("资金校验锁超时");
+    err.status = 503;
+    throw err;
+  }
+}
+
+async function insertBuyHangWithFunds({ db, snapshot, account, stock, price, qty, source }) {
+  const lockName = `qmt:funds:${account}`.slice(0, 64);
+  const conn = await db.getConnection();
+  let locked = false;
+  try {
+    await acquireNamedLock(conn, lockName);
+    locked = true;
+    await assertBuyFunds(conn, snapshot, account, price, qty);
+    const [result] = await conn.query(
+      `INSERT INTO pending_orders (account, stock, side, price, qty, status, source, action)
+       VALUES (?, ?, 'buy', ?, ?, 'pending', ?, 'hang')`,
+      [account, stock, price, qty, source]
+    );
+    return result.insertId;
+  } finally {
+    if (locked) await conn.query(`SELECT RELEASE_LOCK(?)`, [lockName]);
+    conn.release();
+  }
+}
+
 async function createHangOrder({ account, stock, side, price, qty, source = "ui", coverQty = 0 }) {
   const s = String(side || "").toLowerCase();
   if (s !== "buy" && s !== "sell") {
@@ -747,6 +822,18 @@ async function createHangOrder({ account, stock, side, price, qty, source = "ui"
     });
     return placed;
   }
+  if (s === "buy") {
+    const id = await insertBuyHangWithFunds({
+      db,
+      snapshot,
+      account: snapAccount,
+      stock: snapStock,
+      price: px,
+      qty: q,
+      source,
+    });
+    return getHangOrder(id);
+  }
   const [result] = await db.query(
     `INSERT INTO pending_orders (account, stock, side, price, qty, status, source, action)
      VALUES (?, ?, ?, ?, ?, 'pending', ?, 'hang')`,
@@ -804,12 +891,23 @@ async function insertCruiseHang({ db, account, stock, side, price, qty, coverQty
       const room = Math.floor((coverQty - have) / 100) * 100;
       if (!(room > 0)) return { covered: true };
       const placeQty = Math.min(qty, room);
-      const [result] = await conn.query(
-        `INSERT INTO pending_orders (account, stock, side, price, qty, status, source, action)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?, 'hang')`,
-        [account, stock, side, price, placeQty, source]
-      );
-      return getHangOrder(result.insertId);
+      const fundsLockName = `qmt:funds:${account}`.slice(0, 64);
+      let fundsLocked = false;
+      try {
+        if (side === "buy") {
+          await acquireNamedLock(conn, fundsLockName);
+          fundsLocked = true;
+          await assertBuyFunds(conn, snapshot, account, price, placeQty);
+        }
+        const [result] = await conn.query(
+          `INSERT INTO pending_orders (account, stock, side, price, qty, status, source, action)
+           VALUES (?, ?, ?, ?, ?, 'pending', ?, 'hang')`,
+          [account, stock, side, price, placeQty, source]
+        );
+        return getHangOrder(result.insertId);
+      } finally {
+        if (fundsLocked) await conn.query(`SELECT RELEASE_LOCK(?)`, [fundsLockName]);
+      }
     } finally {
       await conn.query(`SELECT RELEASE_LOCK(?)`, [lockName]);
     }
@@ -1379,4 +1477,5 @@ module.exports = {
   releaseCruiseLease,
   claimCruiseSeen,
   unclaimCruiseSeen,
+  _test: { buyFundsCheck, mergeSyncPayload },
 };
